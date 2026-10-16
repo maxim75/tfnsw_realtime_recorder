@@ -163,9 +163,18 @@ the API.
 - `FeedStatus` per feed: `last_poll_at`, `vehicles`, `rows_written_last_poll`,
   `rows_in_window`, `current_file`, `last_error`, `last_error_at`,
   `total_rows`. Guarded by a lock; the web layer reads copies.
-- Unexpected exception in the loop (not `TripPlannerError`): log with
-  traceback, mark `recorder.alive = False`, thread exits. `/healthz` then
-  returns 500 and Coolify restarts the container.
+- Per-feed errors (`TripPlannerError` and any other `Exception`, e.g.
+  `ChunkedEncodingError` or a disk write failure): logged (traceback for
+  unexpected ones), recorded as the feed's `last_error`, other feeds continue.
+  A feed's dedupe state is committed only after its write succeeds, and is
+  pruned to the vehicles seen in the latest poll (bounds memory; a vehicle that
+  vanishes and returns with the same timestamp is written again).
+- If the recorder thread itself dies: log, close writers, mark
+  `recorder.alive = False`, then terminate the process (injectable `on_fatal`,
+  default `SIGTERM` to self) so uvicorn shuts down gracefully and the restart
+  policy restarts the container. `/healthz` returns 500 meanwhile. The
+  uploader does the same if its thread dies; an unlink failure after a
+  successful upload is non-fatal and the file is not re-uploaded.
 - Stop: an `Event`; the sleep loop wakes every ≤1 s to check it and to rotate
   ended windows.
 
@@ -193,16 +202,18 @@ uvicorn handles `SIGTERM` and runs the lifespan shutdown:
 
 1. Stop the recorder (finish the in-flight request, no new polls).
 2. Close all open writers → files to `complete/`, queued.
-3. Uploader drains the queue for up to 20 s, then stops. Whatever remains in
+3. Uploader drains the queue for up to 15 s, then stops (S3 client timeouts:
+   connect 5 s, read 30 s). Whatever remains in
    `complete/` is uploaded after the next start.
 
-Docker `stop_grace_period` default is 10 s; the README tells the user to set
-Coolify's stop/grace timeout to 30 s. If killed early, files remain on the
+Worst case is about 25 s (recorder stop 10 s + uploader drain 15 s). Docker's
+default stop timeout is 10 s; the README tells the user to set the stop timeout
+to 30 s. If killed early, files remain on the
 volume and nothing is lost.
 
 ## Docker and Coolify
 
-- `Dockerfile`: `python:3.12-slim`, copy `uv` binary from
+- `Dockerfile`: `python:3.12.12-slim-bookworm`, copy `uv` binary from
   `ghcr.io/astral-sh/uv` (pinned tag), `uv sync --frozen --no-dev`, non-root
   user `app` owning `/data`, `EXPOSE 8000`, `HEALTHCHECK` with Python's
   `urllib` hitting `/healthz` (no curl in slim image), `CMD` runs uvicorn via
@@ -215,7 +226,8 @@ volume and nothing is lost.
 
 ## Dependencies
 
-Add `fastapi`, `uvicorn` (plain, no `[standard]`), `boto3`. Dev group:
+Add `fastapi`, `uvicorn` (plain, no `[standard]`), `boto3`, `tzdata` (zoneinfo
+data for the slim image). Dev group:
 `pytest`, `httpx` (for `TestClient`).
 
 ## Testing

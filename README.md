@@ -67,6 +67,9 @@ vehiclepos/feed=buses/date=2026-10-16/buses_2026-10-16T12-10+1100.csv.gz
 The `+1100`/`+1000` offset keeps the repeated hour at the end of daylight
 saving unique. A window cut short by a restart, or a feed switched off and on
 again, continues in `..._p2.csv.gz`; existing objects are never overwritten.
+An upload retried after an ambiguous failure (e.g. a timeout after S3 stored
+the object) can occasionally create a `_pN` duplicate; deduplicate on
+`vehicle_id` + `timestamp` downstream.
 
 | column | notes |
 |---|---|
@@ -113,8 +116,18 @@ SELECT * FROM read_csv('s3://<bucket>/vehiclepos/feed=buses/date=2026-10-16/*.cs
    inside the container with curl/wget, which the slim image does not have.
    The image's Docker `HEALTHCHECK` (Python, hits `/healthz` every 30 s)
    reports container health instead.
-6. Docker's default stop timeout is 10 s, but the shutdown upload can take up
-   to ~25 s. If Coolify offers it, raise the container stop timeout to 30 s
-   (e.g. via custom Docker run options: `--stop-timeout 30`). Otherwise the
-   last partial window is uploaded after the next start, so nothing is lost.
+6. Docker's default stop timeout is 10 s, but shutdown can take up to ~25 s
+   (recorder stop up to 10 s, then the upload drain up to 15 s). Set the
+   container stop timeout to 30 s if Coolify offers it (e.g. via custom Docker
+   run options: `--stop-timeout 30`). Otherwise the last partial window is
+   uploaded after the next start, so nothing is lost.
 7. Run **one** instance only; two would record every feed twice.
+8. Use a long, random `ADMIN_PASSWORD` and expose the page only over the
+   HTTPS domain (basic auth sends the password with every request).
+9. Logs: one INFO summary line per poll cycle (feeds, vehicles, new rows,
+   errors); per-feed lines are DEBUG. Docker's default `json-file` log driver
+   does not rotate, so configure log rotation in Coolify/Docker if needed.
+
+If the recorder or uploader thread dies, the process terminates itself so the
+restart policy restarts the container (`/healthz` reports 500 meanwhile).
+Errors on a single feed or file never stop recording; they show on the page.

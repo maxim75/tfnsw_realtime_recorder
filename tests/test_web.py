@@ -84,6 +84,7 @@ def test_status(ctx):
     assert len(feeds) == 23
     assert feeds["buses"]["enabled"] is True and feeds["buses"]["vehicles"] == 5
     assert feeds["lightrail/newcastle"]["enabled"] is False
+    assert set(feeds["lightrail/newcastle"]) == set(feeds["buses"])  # same keys for every feed
     assert body["uploader"]["pending"] == 2
     assert "secret" not in str(body) and "admin_password" not in str(body)
 
@@ -151,4 +152,4 @@ def test_uploader_stopped_even_if_recorder_stop_raises(tmp_path):
     with pytest.raises(RuntimeError, match="stop failed"):
         with TestClient(create_app(env, comps)):
             pass
-    assert uploader.stop_calls == [20]
+    assert uploader.stop_calls == [15]

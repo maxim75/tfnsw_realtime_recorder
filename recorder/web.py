@@ -15,7 +15,7 @@ from tfnsw_trip_planner import TripPlannerClient
 
 from .config import EnvConfig, SettingsStore
 from .feeds import DAILY_REQUEST_QUOTA, KNOWN_FEEDS
-from .recorder import Recorder
+from .recorder import FeedStatus, Recorder
 from .uploader import Uploader, make_s3_client
 from .writer import recover_open_files
 
@@ -67,9 +67,9 @@ def create_app(env: EnvConfig | None = None, components: Components | None = Non
         finally:
             log.info("Shutting down: closing open files and uploading")
             try:
-                comps.recorder.stop()
+                comps.recorder.stop(timeout=10)
             finally:
-                comps.uploader.stop(timeout=20)
+                comps.uploader.stop(timeout=15)
 
     app = FastAPI(
         title="TfNSW vehicle position recorder",
@@ -102,7 +102,7 @@ def create_app(env: EnvConfig | None = None, components: Components | None = Non
         feeds = []
         for feed in KNOWN_FEEDS:
             st = feed_status.get(feed)
-            feeds.append({"feed": feed, "enabled": feed in settings.feeds, **(asdict(st) if st else {})})
+            feeds.append({"feed": feed, "enabled": feed in settings.feeds, **asdict(st or FeedStatus())})
         return {
             "recorder": {"alive": comps.recorder.alive, "started_at": comps.recorder.started_at},
             "settings": settings.to_dict(),
