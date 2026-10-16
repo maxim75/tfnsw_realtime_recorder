@@ -61,13 +61,23 @@ def create_app(env: EnvConfig | None = None, components: Components | None = Non
     @asynccontextmanager
     async def lifespan(_: FastAPI):
         comps.uploader.start()
-        comps.recorder.start()
-        yield
-        log.info("Shutting down: closing open files and uploading")
-        comps.recorder.stop()
-        comps.uploader.stop(timeout=20)
+        try:
+            comps.recorder.start()
+            yield
+        finally:
+            log.info("Shutting down: closing open files and uploading")
+            try:
+                comps.recorder.stop()
+            finally:
+                comps.uploader.stop(timeout=20)
 
-    app = FastAPI(title="TfNSW vehicle position recorder", lifespan=lifespan, docs_url=None, redoc_url=None)
+    app = FastAPI(
+        title="TfNSW vehicle position recorder",
+        lifespan=lifespan,
+        docs_url=None,
+        redoc_url=None,
+        openapi_url=None,
+    )
     security = HTTPBasic()
 
     def require_auth(creds: HTTPBasicCredentials = Depends(security)) -> None:

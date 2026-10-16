@@ -59,6 +59,13 @@
 const $ = (id) => document.getElementById(id);
 let dirty = false;
 
+function fmtUptime(iso) {
+  if (!iso) return "";
+  const s = Math.max(0, Math.floor((Date.now() - new Date(iso).getTime()) / 1000));
+  const d = Math.floor(s / 86400), h = Math.floor((s % 86400) / 3600), m = Math.floor((s % 3600) / 60);
+  return `up ${d ? `${d}d ${h}h ${m}m` : h ? `${h}h ${m}m` : `${m}m`}`;
+}
+
 const fmtTime = (iso) => iso
   ? new Date(iso).toLocaleString("en-AU", { timeZone: "Australia/Sydney", hour12: false })
   : "—";
@@ -82,7 +89,8 @@ function markDirty() { dirty = true; $("save").disabled = false; updateQuota(); 
 function render(s) {
   $("state").textContent = s.recorder.alive ? "● Recording" : "● Stopped";
   $("state").className = s.recorder.alive ? "ok" : "bad";
-  $("uptime").textContent = s.recorder.started_at ? `since ${fmtTime(s.recorder.started_at)}` : "";
+  $("uptime").textContent = s.recorder.started_at
+    ? `${fmtUptime(s.recorder.started_at)} · since ${fmtTime(s.recorder.started_at)}` : "";
   if (!dirty) $("interval").value = s.settings.interval;
 
   const checked = dirty
