@@ -1,0 +1,156 @@
+[sydney]
+name = "Sydney"
+timezone = "Australia/Sydney"
+center = [151.05, -33.85]            # lon, lat
+zoom = 10.3
+s3_prefix = "vehiclepos"             # existing layout; env S3_PREFIX overrides it
+attribution = "Transport for NSW (CC BY 4.0)"
+interval = 30                        # default poll interval, s
+max_requests_per_second = 5
+daily_quota = 60000
+default_feeds = [
+    "buses",
+    "sydneytrains",
+    "metro",
+    "nswtrains",
+    "ferries/sydneyferries",
+    "ferries/MFF",
+    "lightrail/cbdandsoutheast",
+    "lightrail/innerwest",
+    "lightrail/parramatta",
+    "regionbuses/sydneysurrounds",
+]
+route_label = { pattern = '_(?P<label>[^_]+)$' }          # 2510_333 -> 333
+headers = { Authorization = "apikey ${TFNSW_API_KEY}" }   # env expanded at load
+
+  [[sydney.feeds]]
+  id = "buses"
+  url = "https://api.transport.nsw.gov.au/v1/gtfs/vehiclepos/buses"
+  mode = "bus"
+
+  [[sydney.feeds]]
+  id = "sydneytrains"
+  url = "https://api.transport.nsw.gov.au/v2/gtfs/vehiclepos/sydneytrains"
+  mode = "rail"
+
+  [[sydney.feeds]]
+  id = "metro"
+  url = "https://api.transport.nsw.gov.au/v2/gtfs/vehiclepos/metro"
+  mode = "metro"
+
+  [[sydney.feeds]]
+  id = "nswtrains"
+  url = "https://api.transport.nsw.gov.au/v1/gtfs/vehiclepos/nswtrains"
+  mode = "rail"
+
+  [[sydney.feeds]]
+  id = "ferries/sydneyferries"
+  url = "https://api.transport.nsw.gov.au/v1/gtfs/vehiclepos/ferries/sydneyferries"
+  mode = "ferry"
+
+  [[sydney.feeds]]
+  id = "ferries/MFF"
+  url = "https://api.transport.nsw.gov.au/v1/gtfs/vehiclepos/ferries/MFF"
+  mode = "ferry"
+
+  [[sydney.feeds]]
+  id = "lightrail/cbdandsoutheast"
+  url = "https://api.transport.nsw.gov.au/v1/gtfs/vehiclepos/lightrail/cbdandsoutheast"
+  mode = "tram"
+
+  [[sydney.feeds]]
+  id = "lightrail/innerwest"
+  url = "https://api.transport.nsw.gov.au/v2/gtfs/vehiclepos/lightrail/innerwest"
+  mode = "tram"
+
+  [[sydney.feeds]]
+  id = "lightrail/newcastle"
+  url = "https://api.transport.nsw.gov.au/v1/gtfs/vehiclepos/lightrail/newcastle"
+  mode = "tram"
+
+  [[sydney.feeds]]
+  id = "lightrail/parramatta"
+  url = "https://api.transport.nsw.gov.au/v1/gtfs/vehiclepos/lightrail/parramatta"
+  mode = "tram"
+
+  [[sydney.feeds]]
+  id = "regionbuses/centralwestandorana"
+  url = "https://api.transport.nsw.gov.au/v1/gtfs/vehiclepos/regionbuses/centralwestandorana"
+  mode = "bus"
+
+  [[sydney.feeds]]
+  id = "regionbuses/centralwestandorana2"
+  url = "https://api.transport.nsw.gov.au/v1/gtfs/vehiclepos/regionbuses/centralwestandorana2"
+  mode = "bus"
+
+  [[sydney.feeds]]
+  id = "regionbuses/farwest"
+  url = "https://api.transport.nsw.gov.au/v1/gtfs/vehiclepos/regionbuses/farwest"
+  mode = "bus"
+
+  [[sydney.feeds]]
+  id = "regionbuses/newcastlehunter"
+  url = "https://api.transport.nsw.gov.au/v1/gtfs/vehiclepos/regionbuses/newcastlehunter"
+  mode = "bus"
+
+  [[sydney.feeds]]
+  id = "regionbuses/newenglandnorthwest"
+  url = "https://api.transport.nsw.gov.au/v1/gtfs/vehiclepos/regionbuses/newenglandnorthwest"
+  mode = "bus"
+
+  [[sydney.feeds]]
+  id = "regionbuses/northcoast"
+  url = "https://api.transport.nsw.gov.au/v1/gtfs/vehiclepos/regionbuses/northcoast"
+  mode = "bus"
+
+  [[sydney.feeds]]
+  id = "regionbuses/northcoast2"
+  url = "https://api.transport.nsw.gov.au/v1/gtfs/vehiclepos/regionbuses/northcoast2"
+  mode = "bus"
+
+  [[sydney.feeds]]
+  id = "regionbuses/northcoast3"
+  url = "https://api.transport.nsw.gov.au/v1/gtfs/vehiclepos/regionbuses/northcoast3"
+  mode = "bus"
+
+  [[sydney.feeds]]
+  id = "regionbuses/riverinamurray"
+  url = "https://api.transport.nsw.gov.au/v1/gtfs/vehiclepos/regionbuses/riverinamurray"
+  mode = "bus"
+
+  [[sydney.feeds]]
+  id = "regionbuses/riverinamurray2"
+  url = "https://api.transport.nsw.gov.au/v1/gtfs/vehiclepos/regionbuses/riverinamurray2"
+  mode = "bus"
+
+  [[sydney.feeds]]
+  id = "regionbuses/southeasttablelands"
+  url = "https://api.transport.nsw.gov.au/v1/gtfs/vehiclepos/regionbuses/southeasttablelands"
+  mode = "bus"
+
+  [[sydney.feeds]]
+  id = "regionbuses/southeasttablelands2"
+  url = "https://api.transport.nsw.gov.au/v1/gtfs/vehiclepos/regionbuses/southeasttablelands2"
+  mode = "bus"
+
+  [[sydney.feeds]]
+  id = "regionbuses/sydneysurrounds"
+  url = "https://api.transport.nsw.gov.au/v1/gtfs/vehiclepos/regionbuses/sydneysurrounds"
+  mode = "bus"
+
+[prague]
+name = "Prague"
+timezone = "Europe/Prague"
+center = [14.44, 50.08]
+zoom = 11
+s3_prefix = "vehiclepos/city=prague"
+attribution = "Golemio / PID (CC BY 4.0)"
+interval = 30
+max_requests_per_second = 1
+static_gtfs = "https://data.pid.cz/PID_GTFS.zip"   # line names and modes
+default_feeds = ["all"]
+
+  [[prague.feeds]]
+  id = "all"
+  url = "https://api.golemio.cz/v2/vehiclepositions/gtfsrt/vehicle_positions.pb"
+  mode = "bus"     # fallback when a route is not in routes.txt
