@@ -1,0 +1,141 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Vehicle position recorder</title>
+<style>
+  :root { --fg:#1d1d1f; --muted:#6e6e73; --bg:#fff; --line:#e5e5ea; --ok:#1a7f37; --bad:#c62828; --accent:#0a58ca; }
+  @media (prefers-color-scheme: dark) { :root { --fg:#f2f2f7; --muted:#a1a1a6; --bg:#151517; --line:#2c2c2e; --ok:#3fb950; --bad:#ff6b6b; --accent:#6ea8fe; } }
+  body { margin:0; padding:16px; font:14px/1.45 system-ui, sans-serif; color:var(--fg); background:var(--bg); }
+  main { max-width:1100px; margin:0 auto; }
+  h1 { font-size:20px; margin:0 0 4px; }
+  .muted { color:var(--muted); }
+  .ok { color:var(--ok); } .bad { color:var(--bad); }
+  header, section { margin-bottom:20px; }
+  .bar { display:flex; flex-wrap:wrap; gap:16px; align-items:center; }
+  table { width:100%; border-collapse:collapse; }
+  th, td { text-align:left; padding:6px 8px; border-bottom:1px solid var(--line); vertical-align:top; }
+  td.num, th.num { text-align:right; font-variant-numeric:tabular-nums; }
+  .wrap { overflow-x:auto; }
+  input[type=number] { width:80px; }
+  button { padding:6px 14px; }
+  .err { color:var(--bad); max-width:320px; overflow-wrap:anywhere; }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <h1>Vehicle position recorder</h1>
+    <div class="bar">
+      <span id="state" class="muted">Loading…</span>
+      <span id="uptime" class="muted"></span>
+      <label>Interval <input id="interval" type="number" min="10" max="3600" step="1"> s</label>
+      <span id="quota"></span>
+      <button id="save" disabled>Save</button>
+      <span id="msg" class="muted"></span>
+    </div>
+  </header>
+
+  <section>
+    <h2>Feeds</h2>
+    <div class="wrap">
+      <table>
+        <thead><tr>
+          <th>On</th><th>Feed</th><th>Last poll</th><th class="num">Vehicles</th>
+          <th class="num">Rows in window</th><th>Current file</th><th>Last error</th>
+        </tr></thead>
+        <tbody id="feeds"></tbody>
+      </table>
+    </div>
+  </section>
+
+  <section>
+    <h2>Uploads</h2>
+    <div id="uploads" class="muted">Loading…</div>
+  </section>
+</main>
+<script>
+const $ = (id) => document.getElementById(id);
+let dirty = false;
+
+const fmtTime = (iso) => iso
+  ? new Date(iso).toLocaleString("en-AU", { timeZone: "Australia/Sydney", hour12: false })
+  : "—";
+const esc = (s) => String(s ?? "").replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]);
+
+function quotaText(feeds, interval) {
+  const perDay = Math.round(feeds * 86400 / interval);
+  return { perDay, text: `${perDay.toLocaleString()} requests/day of 60,000` };
+}
+
+function updateQuota() {
+  const feeds = document.querySelectorAll("#feeds input:checked").length;
+  const interval = Number($("interval").value) || 1;
+  const q = quotaText(feeds, interval);
+  $("quota").textContent = q.text;
+  $("quota").className = q.perDay > 60000 ? "bad" : "muted";
+}
+
+function markDirty() { dirty = true; $("save").disabled = false; updateQuota(); }
+
+function render(s) {
+  $("state").textContent = s.recorder.alive ? "● Recording" : "● Stopped";
+  $("state").className = s.recorder.alive ? "ok" : "bad";
+  $("uptime").textContent = s.recorder.started_at ? `since ${fmtTime(s.recorder.started_at)}` : "";
+  if (!dirty) $("interval").value = s.settings.interval;
+
+  const checked = dirty
+    ? new Set([...document.querySelectorAll("#feeds input:checked")].map((i) => i.value))
+    : new Set(s.settings.feeds);
+  $("feeds").innerHTML = s.feeds.map((f) => `
+    <tr>
+      <td><input type="checkbox" value="${esc(f.feed)}" ${checked.has(f.feed) ? "checked" : ""}></td>
+      <td>${esc(f.feed)}</td>
+      <td>${fmtTime(f.last_poll_at)}</td>
+      <td class="num">${f.vehicles ?? "—"}</td>
+      <td class="num">${f.rows_in_window ?? "—"}</td>
+      <td class="muted">${esc(f.current_file ?? "—")}</td>
+      <td class="err">${f.last_error ? `${esc(f.last_error)}<br><span class="muted">${fmtTime(f.last_error_at)}</span>` : ""}</td>
+    </tr>`).join("");
+  document.querySelectorAll("#feeds input").forEach((i) => i.addEventListener("change", markDirty));
+  updateQuota();
+
+  const u = s.uploader;
+  $("uploads").innerHTML = u.s3_configured
+    ? `Bucket <b>${esc(u.bucket)}</b> · pending <b>${u.pending}</b> · uploaded <b>${u.uploaded_total}</b><br>
+       Last upload: ${esc(u.last_uploaded_key ?? "—")} ${u.last_uploaded_at ? "at " + fmtTime(u.last_uploaded_at) : ""}
+       ${u.last_error ? `<div class="err">Last error (${fmtTime(u.last_error_at)}): ${esc(u.last_error)}</div>` : ""}`
+    : `<span class="bad">S3 not configured</span> — ${u.pending} completed files kept locally.`;
+}
+
+async function refresh() {
+  try {
+    const r = await fetch("/api/status");
+    if (r.ok) render(await r.json());
+  } catch (e) { $("msg").textContent = "Status unavailable"; }
+}
+
+$("interval").addEventListener("input", markDirty);
+$("save").addEventListener("click", async () => {
+  const feeds = [...document.querySelectorAll("#feeds input:checked")].map((i) => i.value);
+  const r = await fetch("/api/settings", {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ feeds, interval: Number($("interval").value) }),
+  });
+  if (r.ok) {
+    dirty = false; $("save").disabled = true;
+    $("msg").textContent = "Saved — applies at the next poll"; $("msg").className = "ok";
+    refresh();
+  } else {
+    const body = await r.json().catch(() => ({}));
+    $("msg").textContent = body.detail || `Error ${r.status}`; $("msg").className = "bad";
+  }
+});
+
+refresh();
+setInterval(refresh, 5000);
+</script>
+</body>
+</html>
