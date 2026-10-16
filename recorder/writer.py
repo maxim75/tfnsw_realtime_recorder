@@ -51,16 +51,27 @@ class RotatingWriter:
             self.close()
         if not rows:
             return
-        new_file = self.current_path is None
-        if new_file:
-            self._window = start
-            self.current_path = self._free_path(start)
-        with gzip.open(self.current_path, "at", newline="") as f:
-            writer = csv.DictWriter(f, fieldnames=FIELDS)
-            if new_file:
+        if self.current_path is not None:
+            with gzip.open(self.current_path, "at", newline="") as f:
+                csv.DictWriter(f, fieldnames=FIELDS).writerows(rows)
+            self.rows_in_window += len(rows)
+            return
+        # First write of a window: only adopt the new file once header + rows are on disk.
+        path = self._free_path(start)
+        try:
+            with gzip.open(path, "at", newline="") as f:
+                writer = csv.DictWriter(f, fieldnames=FIELDS)
                 writer.writeheader()
-            writer.writerows(rows)
-        self.rows_in_window += len(rows)
+                writer.writerows(rows)
+        except BaseException:
+            try:
+                path.unlink(missing_ok=True)
+            except OSError:
+                pass
+            raise
+        self._window = start
+        self.current_path = path
+        self.rows_in_window = len(rows)
 
     def rotate_if_ended(self, now: datetime) -> None:
         if self._window is not None and window_start(now) != self._window:

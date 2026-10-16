@@ -6,10 +6,12 @@ import queue
 import re
 import threading
 import time
+from collections.abc import Callable
 from datetime import datetime
 from pathlib import Path
 
 from .config import S3Config
+from .recorder import terminate_process
 from .windows import SYDNEY_TZ
 
 log = logging.getLogger(__name__)
@@ -46,6 +48,8 @@ def make_s3_client(s3: S3Config):
             request_checksum_calculation="when_required",
             response_checksum_validation="when_required",
             retries={"max_attempts": 3},
+            connect_timeout=5,
+            read_timeout=30,
         ),
     )
 
@@ -62,6 +66,7 @@ class Uploader:
         *,
         backoff_initial: float = 5.0,
         backoff_max: float = 300.0,
+        on_fatal: Callable[[], None] = terminate_process,
     ) -> None:
         self._client = client
         self._bucket = bucket
@@ -69,6 +74,8 @@ class Uploader:
         self._data_dir = data_dir
         self._backoff_initial = backoff_initial
         self._backoff_max = backoff_max
+        self._on_fatal = on_fatal
+        self._uploaded: set[Path] = set()  # uploaded but local delete failed: never re-upload
         self._queue: queue.Queue[Path] = queue.Queue()
         self._stop = threading.Event()
         self._deadline = 0.0
@@ -124,7 +131,14 @@ class Uploader:
                 self._last_error = str(exc)
                 self._last_error_at = datetime.now(tz=SYDNEY_TZ)
             return False
-        path.unlink(missing_ok=True)
+        try:
+            path.unlink(missing_ok=True)
+        except OSError as exc:
+            log.warning("Uploaded %s but could not delete %s: %s", key, path, exc)
+            with self._lock:
+                self._uploaded.add(path)
+                self._last_error = f"uploaded but local delete failed: {exc}"
+                self._last_error_at = datetime.now(tz=SYDNEY_TZ)
         log.info("Uploaded %s", key)
         with self._lock:
             self._uploaded_total += 1
@@ -142,6 +156,17 @@ class Uploader:
             raise
 
     def _run(self) -> None:
+        try:
+            self._loop()
+        except Exception:
+            log.exception("Uploader thread died")
+            self._on_fatal()
+            return
+        if not self._stop.is_set():
+            log.error("Uploader thread exited unexpectedly")
+            self._on_fatal()
+
+    def _loop(self) -> None:
         backoff = self._backoff_initial
         while True:
             if self._stop.is_set() and (self._queue.empty() or time.monotonic() > self._deadline):
@@ -150,11 +175,17 @@ class Uploader:
                 path = self._queue.get(timeout=0.5)
             except queue.Empty:
                 continue
-            if not path.exists():
-                continue
-            if self.upload(path):
-                backoff = self._backoff_initial
-                continue
+            try:
+                if path in self._uploaded or not path.exists():
+                    continue
+                if self.upload(path):
+                    backoff = self._backoff_initial
+                    continue
+            except Exception as exc:
+                log.exception("Uploader error on %s", path.name)
+                with self._lock:
+                    self._last_error = str(exc) or type(exc).__name__
+                    self._last_error_at = datetime.now(tz=SYDNEY_TZ)
             self._queue.put(path)
             if self._stop.is_set():
                 return  # shutting down: leave it for the next start

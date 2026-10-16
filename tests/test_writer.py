@@ -2,6 +2,8 @@ import csv
 import gzip
 from datetime import datetime, timezone
 
+import pytest
+
 from recorder.writer import FIELDS, RotatingWriter, recover_open_files
 
 
@@ -86,3 +88,24 @@ def test_recover_open_files(tmp_path):
     assert recovered == [tmp_path / "complete/buses/buses_2026-10-16T12-10+1100.csv.gz"]
     assert not list((tmp_path / "open").rglob("*.csv.gz"))
     assert len(read_rows(recovered[0])) == 1
+
+
+def test_failed_first_write_leaves_no_state_and_next_write_has_header(tmp_path, monkeypatch):
+    w = RotatingWriter("buses", tmp_path, lambda p: None)
+    real = csv.DictWriter.writerows
+    calls = []
+
+    def flaky(self, rows):
+        if not calls:
+            calls.append(1)
+            raise OSError(28, "No space left on device")
+        return real(self, rows)
+
+    monkeypatch.setattr(csv.DictWriter, "writerows", flaky)
+    with pytest.raises(OSError):
+        w.write(utc(2026, 10, 16, 1, 11), [row("a")])
+    assert w.current_path is None and w.rows_in_window == 0
+    assert not list((tmp_path / "open").rglob("*.csv.gz"))  # partial file removed
+    w.write(utc(2026, 10, 16, 1, 12), [row("b")])
+    assert [r["vehicle_id"] for r in read_rows(w.current_path)] == ["b"]
+    assert w.rows_in_window == 1

@@ -110,3 +110,80 @@ def test_disabled_uploader_keeps_files(tmp_path):
     st = up.status()
     assert st["s3_configured"] is False and st["pending"] == 1
     assert up.alive  # disabled is healthy
+
+
+def test_unlink_failure_keeps_thread_alive_and_does_not_reupload(tmp_path, monkeypatch):
+    s3 = FakeS3()
+    up = Uploader(s3, "bucket", "vehiclepos", tmp_path, backoff_initial=0.01, backoff_max=0.02)
+    first = make_file(tmp_path)
+    second = make_file(tmp_path, "buses_2026-10-16T12-20+1100.csv.gz")
+    real_unlink = Path.unlink
+    unlink_calls = []
+
+    def flaky_unlink(self, *a, **k):
+        if self == first:
+            unlink_calls.append(self)
+            raise OSError(30, "read-only file system")
+        return real_unlink(self, *a, **k)
+
+    monkeypatch.setattr(Path, "unlink", flaky_unlink)
+    up.start()
+    key2 = KEY.replace("12-10", "12-20")
+    deadline = time.monotonic() + 5
+    while key2 not in s3.objects and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert key2 in s3.objects and up.alive
+    up.enqueue(first)  # e.g. picked up again; must be skipped
+    time.sleep(0.8)
+    up.stop(timeout=1)
+    assert KEY in s3.objects and not any("_p2" in k for k in s3.objects)
+    assert first.exists() and not second.exists()
+    assert "read-only" in up.status()["last_error"]
+
+
+def test_loop_body_exception_does_not_kill_thread(tmp_path):
+    s3 = FakeS3()
+    up = Uploader(s3, "bucket", "vehiclepos", tmp_path, backoff_initial=0.01, backoff_max=0.02)
+    calls = []
+    real = up.upload
+
+    def flaky(path):
+        calls.append(path)
+        if len(calls) == 1:
+            raise RuntimeError("unexpected")
+        return real(path)
+
+    up.upload = flaky
+    path = make_file(tmp_path)
+    up.start()
+    deadline = time.monotonic() + 5
+    while KEY not in s3.objects and time.monotonic() < deadline:
+        time.sleep(0.01)
+    up.stop(timeout=1)
+    assert KEY in s3.objects
+    assert "unexpected" in up.status()["last_error"]
+
+
+def test_unexpected_thread_exit_calls_on_fatal(tmp_path):
+    fatal = []
+    up = Uploader(FakeS3(), "bucket", "vehiclepos", tmp_path, on_fatal=lambda: fatal.append(1))
+
+    def boom(path):
+        raise RuntimeError("unexpected")
+
+    up.upload = boom
+    up._lock = None  # the guarded handler itself fails, so the error escapes the loop
+    make_file(tmp_path)
+    up.start()
+    deadline = time.monotonic() + 5
+    while not fatal and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert fatal == [1]
+
+
+def test_normal_stop_does_not_call_on_fatal(tmp_path):
+    fatal = []
+    up = Uploader(FakeS3(), "bucket", "vehiclepos", tmp_path, on_fatal=lambda: fatal.append(1))
+    up.start()
+    up.stop(timeout=1)
+    assert fatal == []
