@@ -71,6 +71,12 @@ An upload retried after an ambiguous failure (e.g. a timeout after S3 stored
 the object) can occasionally create a `_pN` duplicate; deduplicate on
 `vehicle_id` + `timestamp` downstream.
 
+Hetzner Object Storage rejects a share of valid requests with HTTP 403
+(about 15% in testing); an immediate retry succeeds. The uploader retries a
+403 up to 3 times within the same upload before treating it as a failure, so
+occasional `403`/`AccessDenied` lines in the logs are expected. A persistent
+403 on every upload means the credentials or bucket name are wrong.
+
 | column | notes |
 |---|---|
 | `fetched_at` | when the recorder polled (Sydney time) |

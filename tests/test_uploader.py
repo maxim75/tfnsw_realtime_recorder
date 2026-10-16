@@ -1,25 +1,47 @@
 import time
 from pathlib import Path
 
+from boto3.exceptions import S3UploadFailedError
 from botocore.exceptions import ClientError
 
 from recorder.uploader import Uploader, next_part_key, object_key
 
 
 class FakeS3:
-    def __init__(self, existing=(), fail_times=0):
+    def __init__(self, existing=(), fail_times=0, deny_head=0, deny_put=0, fail_keys=(), deny_code="AccessDenied"):
         self.objects = {k: b"" for k in existing}
         self.fail_times = fail_times
+        self.deny_head = deny_head  # next N head_object calls get a spurious 403
+        self.deny_put = deny_put  # next N upload_file calls get a spurious AccessDenied
+        self.fail_keys = set(fail_keys)  # keys whose upload always fails with 500
+        self.deny_code = deny_code  # Hetzner sometimes sends an empty code with HTTP 403
         self.extra_args = []
+        self.put_attempts = 0
 
     def head_object(self, Bucket, Key):
+        if self.deny_head:
+            self.deny_head -= 1
+            raise ClientError({"Error": {"Code": "403", "Message": "Forbidden"}}, "HeadObject")
         if Key in self.objects:
             return {}
         raise ClientError({"Error": {"Code": "404", "Message": "Not Found"}}, "HeadObject")
 
     def upload_file(self, Filename, Bucket, Key, ExtraArgs=None):
-        if self.fail_times:
-            self.fail_times -= 1
+        self.put_attempts += 1
+        if self.deny_put:
+            self.deny_put -= 1
+            # boto3's transfer manager re-raises the ClientError like this (inside except)
+            denial = ClientError(
+                {"Error": {"Code": self.deny_code, "Message": ""},
+                 "ResponseMetadata": {"HTTPStatusCode": 403}},
+                "PutObject",
+            )
+            try:
+                raise denial
+            except ClientError as e:
+                raise S3UploadFailedError(f"Failed to upload {Filename} to {Bucket}/{Key}: {e}")
+        if self.fail_times or Key in self.fail_keys:
+            self.fail_times = max(0, self.fail_times - 1)
             raise ClientError({"Error": {"Code": "500", "Message": "boom"}}, "PutObject")
         self.objects[Key] = Path(Filename).read_bytes()
         self.extra_args.append(ExtraArgs)
@@ -187,3 +209,56 @@ def test_normal_stop_does_not_call_on_fatal(tmp_path):
     up.start()
     up.stop(timeout=1)
     assert fatal == []
+
+
+def test_spurious_403_on_head_is_retried_within_the_upload(tmp_path):
+    s3 = FakeS3(deny_head=2)
+    up = Uploader(s3, "bucket", "vehiclepos", tmp_path, denial_retry_delay=0)
+    assert up.upload(make_file(tmp_path))
+    assert KEY in s3.objects  # not a _p2: the 403s were not taken as "exists"
+
+
+def test_spurious_access_denied_on_put_is_retried_within_the_upload(tmp_path):
+    s3 = FakeS3(deny_put=2)
+    up = Uploader(s3, "bucket", "vehiclepos", tmp_path, denial_retry_delay=0)
+    path = make_file(tmp_path)
+    assert up.upload(path)
+    assert s3.objects[KEY] == b"data" and s3.put_attempts == 3
+    assert not path.exists()
+
+
+def test_persistent_access_denied_gives_up_and_keeps_file(tmp_path):
+    s3 = FakeS3(deny_put=100)
+    up = Uploader(s3, "bucket", "vehiclepos", tmp_path, denial_retry_delay=0)
+    path = make_file(tmp_path)
+    assert not up.upload(path)
+    assert s3.put_attempts == 4  # first try + 3 quick retries
+    assert path.exists()
+    assert "AccessDenied" in up.status()["last_error"]
+
+
+def test_stop_keeps_draining_after_a_failed_file(tmp_path):
+    names = [f"buses_2026-10-16T12-{m}+1100.csv.gz" for m in ("00", "10", "20")]
+    keys = [f"vehiclepos/feed=buses/date=2026-10-16/{n}" for n in names]
+    s3 = FakeS3(fail_keys=[keys[0]])
+    up = Uploader(s3, "bucket", "vehiclepos", tmp_path, denial_retry_delay=0)
+    paths = [make_file(tmp_path, n) for n in names]
+    up.start()
+    up.stop(timeout=2)
+    assert keys[1] in s3.objects and keys[2] in s3.objects
+    assert paths[0].exists()  # left for the next start
+    assert not paths[1].exists() and not paths[2].exists()
+
+
+def test_access_denied_with_empty_error_code_is_retried(tmp_path):
+    s3 = FakeS3(deny_put=1, deny_code="")
+    up = Uploader(s3, "bucket", "vehiclepos", tmp_path, denial_retry_delay=0)
+    assert up.upload(make_file(tmp_path))
+    assert s3.put_attempts == 2
+
+
+def test_other_put_errors_are_not_retried_quickly(tmp_path):
+    s3 = FakeS3(fail_keys=[KEY])
+    up = Uploader(s3, "bucket", "vehiclepos", tmp_path, denial_retry_delay=0)
+    assert not up.upload(make_file(tmp_path))
+    assert s3.put_attempts == 1

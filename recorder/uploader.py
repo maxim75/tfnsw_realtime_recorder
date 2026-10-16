@@ -18,6 +18,27 @@ log = logging.getLogger(__name__)
 
 _PART = re.compile(r"^(?P<base>.*?)(?:_p(?P<part>\d+))?\.csv\.gz$")
 
+# Hetzner Object Storage rejects a fraction of valid requests with 403 (measured ~15%
+# on 2026-10-16); an immediate retry succeeds. Retry those quickly inside one upload.
+_DENIAL_CODES = ("403", "AccessDenied", "Forbidden")
+DENIAL_RETRIES = 3
+
+
+def _is_denial(exc: Exception) -> bool:
+    from boto3.exceptions import S3UploadFailedError
+    from botocore.exceptions import ClientError
+
+    if isinstance(exc, S3UploadFailedError):
+        # upload_file re-raises the PutObject ClientError inside `except`, so it is the context.
+        exc = exc.__context__
+    if not isinstance(exc, ClientError):
+        return False
+    # Hetzner's denials sometimes carry an empty error code; the HTTP status is reliable.
+    return (
+        exc.response.get("ResponseMetadata", {}).get("HTTPStatusCode") == 403
+        or exc.response.get("Error", {}).get("Code") in _DENIAL_CODES
+    )
+
 
 def object_key(prefix: str, path: Path) -> str:
     """``{prefix}/feed={feed_dir}/date={YYYY-MM-DD}/{name}`` for a file in ``complete/<feed_dir>/``."""
@@ -67,6 +88,7 @@ class Uploader:
         backoff_initial: float = 5.0,
         backoff_max: float = 300.0,
         on_fatal: Callable[[], None] = terminate_process,
+        denial_retry_delay: float = 0.5,
     ) -> None:
         self._client = client
         self._bucket = bucket
@@ -75,6 +97,7 @@ class Uploader:
         self._backoff_initial = backoff_initial
         self._backoff_max = backoff_max
         self._on_fatal = on_fatal
+        self._denial_retry_delay = denial_retry_delay
         self._uploaded: set[Path] = set()  # uploaded but local delete failed: never re-upload
         self._queue: queue.Queue[Path] = queue.Queue()
         self._stop = threading.Event()
@@ -120,10 +143,11 @@ class Uploader:
 
         try:
             key = object_key(self._prefix, path)
-            while self._exists(key, ClientError):
+            while self._retry_denials(self._exists, key, ClientError):
                 key = next_part_key(key)
-            self._client.upload_file(
-                str(path), self._bucket, key, ExtraArgs={"ContentType": "application/gzip"}
+            self._retry_denials(
+                self._client.upload_file,
+                str(path), self._bucket, key, ExtraArgs={"ContentType": "application/gzip"},
             )
         except Exception as exc:  # boto3/botocore raise many unrelated types
             log.warning("Upload of %s failed: %s", path.name, exc)
@@ -145,6 +169,17 @@ class Uploader:
             self._last_uploaded_key = key
             self._last_uploaded_at = datetime.now(tz=SYDNEY_TZ)
         return True
+
+    def _retry_denials(self, fn, *args, **kwargs):
+        """Call *fn*, retrying spurious 403/AccessDenied up to DENIAL_RETRIES times."""
+        for attempt in range(DENIAL_RETRIES + 1):
+            try:
+                return fn(*args, **kwargs)
+            except Exception as exc:
+                if attempt == DENIAL_RETRIES or not _is_denial(exc):
+                    raise
+                log.debug("Spurious denial (%s), retrying", exc)
+                time.sleep(self._denial_retry_delay * (attempt + 1))
 
     def _exists(self, key: str, client_error: type[Exception]) -> bool:
         try:
@@ -186,9 +221,9 @@ class Uploader:
                 with self._lock:
                     self._last_error = str(exc) or type(exc).__name__
                     self._last_error_at = datetime.now(tz=SYDNEY_TZ)
-            self._queue.put(path)
             if self._stop.is_set():
-                return  # shutting down: leave it for the next start
+                continue  # shutting down: try the rest; this file stays on disk for the next start
+            self._queue.put(path)
             self._stop.wait(backoff)
             backoff = min(backoff * 2, self._backoff_max)
 
