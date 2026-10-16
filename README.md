@@ -4,7 +4,8 @@ Records Transport for NSW **live vehicle positions** (GTFS-Realtime) into
 10-minute gzipped CSV files per feed and uploads each finished file to
 S3-compatible storage (Hetzner Object Storage). A small web page shows the
 recorder's status and lets you switch feeds on/off and change the polling
-interval. Uses [tfnsw_trip_planner](https://github.com/maxim75/tfnsw_trip_planner).
+interval. Feeds are plain GTFS-Realtime URLs, configured per city in
+`recorder/cities.toml`.
 
 ## Configuration
 

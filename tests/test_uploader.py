@@ -47,8 +47,11 @@ class FakeS3:
         self.extra_args.append(ExtraArgs)
 
 
-def make_file(data_dir, name="buses_2026-10-16T12-10+1100.csv.gz", feed_dir="buses"):
-    path = data_dir / "complete" / feed_dir / name
+PREFIXES = {"sydney": "vehiclepos", "prague": "vehiclepos/city=prague"}
+
+
+def make_file(data_dir, name="buses_2026-10-16T12-10+1100.csv.gz", feed_dir="buses", city="sydney"):
+    path = data_dir / city / "complete" / feed_dir / name
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_bytes(b"data")
     return path
@@ -72,7 +75,7 @@ def test_next_part_key():
 
 def test_upload_success_deletes_local_file(tmp_path):
     s3 = FakeS3()
-    up = Uploader(s3, "bucket", "vehiclepos", tmp_path)
+    up = Uploader(s3, "bucket", PREFIXES, tmp_path)
     path = make_file(tmp_path)
     assert up.upload(path)
     assert s3.objects[KEY] == b"data"
@@ -84,14 +87,14 @@ def test_upload_success_deletes_local_file(tmp_path):
 
 def test_existing_object_is_not_overwritten(tmp_path):
     s3 = FakeS3(existing=[KEY])
-    up = Uploader(s3, "bucket", "vehiclepos", tmp_path)
+    up = Uploader(s3, "bucket", PREFIXES, tmp_path)
     assert up.upload(make_file(tmp_path))
     assert s3.objects[KEY] == b""
     assert s3.objects[KEY.replace(".csv.gz", "_p2.csv.gz")] == b"data"
 
 
 def test_failure_keeps_file_and_records_error(tmp_path):
-    up = Uploader(FakeS3(fail_times=1), "bucket", "vehiclepos", tmp_path)
+    up = Uploader(FakeS3(fail_times=1), "bucket", PREFIXES, tmp_path)
     path = make_file(tmp_path)
     assert not up.upload(path)
     assert path.exists()
@@ -100,7 +103,7 @@ def test_failure_keeps_file_and_records_error(tmp_path):
 
 def test_worker_retries_until_s3_recovers(tmp_path):
     s3 = FakeS3(fail_times=2)
-    up = Uploader(s3, "bucket", "vehiclepos", tmp_path, backoff_initial=0.01, backoff_max=0.02)
+    up = Uploader(s3, "bucket", PREFIXES, tmp_path, backoff_initial=0.01, backoff_max=0.02)
     path = make_file(tmp_path)
     up.start()  # startup scan finds the file in complete/
     deadline = time.monotonic() + 5
@@ -114,7 +117,7 @@ def test_worker_retries_until_s3_recovers(tmp_path):
 
 def test_stop_drains_queue(tmp_path):
     s3 = FakeS3()
-    up = Uploader(s3, "bucket", "vehiclepos", tmp_path)
+    up = Uploader(s3, "bucket", PREFIXES, tmp_path)
     up.start()
     up.enqueue(make_file(tmp_path))
     up.stop(timeout=2)
@@ -123,7 +126,7 @@ def test_stop_drains_queue(tmp_path):
 
 
 def test_disabled_uploader_keeps_files(tmp_path):
-    up = Uploader(None, None, "vehiclepos", tmp_path)
+    up = Uploader(None, None, PREFIXES, tmp_path)
     path = make_file(tmp_path)
     up.start()
     up.enqueue(path)
@@ -136,7 +139,7 @@ def test_disabled_uploader_keeps_files(tmp_path):
 
 def test_unlink_failure_keeps_thread_alive_and_does_not_reupload(tmp_path, monkeypatch):
     s3 = FakeS3()
-    up = Uploader(s3, "bucket", "vehiclepos", tmp_path, backoff_initial=0.01, backoff_max=0.02)
+    up = Uploader(s3, "bucket", PREFIXES, tmp_path, backoff_initial=0.01, backoff_max=0.02)
     first = make_file(tmp_path)
     second = make_file(tmp_path, "buses_2026-10-16T12-20+1100.csv.gz")
     real_unlink = Path.unlink
@@ -165,7 +168,7 @@ def test_unlink_failure_keeps_thread_alive_and_does_not_reupload(tmp_path, monke
 
 def test_loop_body_exception_does_not_kill_thread(tmp_path):
     s3 = FakeS3()
-    up = Uploader(s3, "bucket", "vehiclepos", tmp_path, backoff_initial=0.01, backoff_max=0.02)
+    up = Uploader(s3, "bucket", PREFIXES, tmp_path, backoff_initial=0.01, backoff_max=0.02)
     calls = []
     real = up.upload
 
@@ -188,7 +191,7 @@ def test_loop_body_exception_does_not_kill_thread(tmp_path):
 
 def test_unexpected_thread_exit_calls_on_fatal(tmp_path):
     fatal = []
-    up = Uploader(FakeS3(), "bucket", "vehiclepos", tmp_path, on_fatal=lambda: fatal.append(1))
+    up = Uploader(FakeS3(), "bucket", PREFIXES, tmp_path, on_fatal=lambda: fatal.append(1))
 
     def boom(path):
         raise RuntimeError("unexpected")
@@ -205,7 +208,7 @@ def test_unexpected_thread_exit_calls_on_fatal(tmp_path):
 
 def test_normal_stop_does_not_call_on_fatal(tmp_path):
     fatal = []
-    up = Uploader(FakeS3(), "bucket", "vehiclepos", tmp_path, on_fatal=lambda: fatal.append(1))
+    up = Uploader(FakeS3(), "bucket", PREFIXES, tmp_path, on_fatal=lambda: fatal.append(1))
     up.start()
     up.stop(timeout=1)
     assert fatal == []
@@ -213,14 +216,14 @@ def test_normal_stop_does_not_call_on_fatal(tmp_path):
 
 def test_spurious_403_on_head_is_retried_within_the_upload(tmp_path):
     s3 = FakeS3(deny_head=2)
-    up = Uploader(s3, "bucket", "vehiclepos", tmp_path, denial_retry_delay=0)
+    up = Uploader(s3, "bucket", PREFIXES, tmp_path, denial_retry_delay=0)
     assert up.upload(make_file(tmp_path))
     assert KEY in s3.objects  # not a _p2: the 403s were not taken as "exists"
 
 
 def test_spurious_access_denied_on_put_is_retried_within_the_upload(tmp_path):
     s3 = FakeS3(deny_put=2)
-    up = Uploader(s3, "bucket", "vehiclepos", tmp_path, denial_retry_delay=0)
+    up = Uploader(s3, "bucket", PREFIXES, tmp_path, denial_retry_delay=0)
     path = make_file(tmp_path)
     assert up.upload(path)
     assert s3.objects[KEY] == b"data" and s3.put_attempts == 3
@@ -229,7 +232,7 @@ def test_spurious_access_denied_on_put_is_retried_within_the_upload(tmp_path):
 
 def test_persistent_access_denied_gives_up_and_keeps_file(tmp_path):
     s3 = FakeS3(deny_put=100)
-    up = Uploader(s3, "bucket", "vehiclepos", tmp_path, denial_retry_delay=0)
+    up = Uploader(s3, "bucket", PREFIXES, tmp_path, denial_retry_delay=0)
     path = make_file(tmp_path)
     assert not up.upload(path)
     assert s3.put_attempts == 4  # first try + 3 quick retries
@@ -241,7 +244,7 @@ def test_stop_keeps_draining_after_a_failed_file(tmp_path):
     names = [f"buses_2026-10-16T12-{m}+1100.csv.gz" for m in ("00", "10", "20")]
     keys = [f"vehiclepos/feed=buses/date=2026-10-16/{n}" for n in names]
     s3 = FakeS3(fail_keys=[keys[0]])
-    up = Uploader(s3, "bucket", "vehiclepos", tmp_path, denial_retry_delay=0)
+    up = Uploader(s3, "bucket", PREFIXES, tmp_path, denial_retry_delay=0)
     paths = [make_file(tmp_path, n) for n in names]
     up.start()
     up.stop(timeout=2)
@@ -252,13 +255,60 @@ def test_stop_keeps_draining_after_a_failed_file(tmp_path):
 
 def test_access_denied_with_empty_error_code_is_retried(tmp_path):
     s3 = FakeS3(deny_put=1, deny_code="")
-    up = Uploader(s3, "bucket", "vehiclepos", tmp_path, denial_retry_delay=0)
+    up = Uploader(s3, "bucket", PREFIXES, tmp_path, denial_retry_delay=0)
     assert up.upload(make_file(tmp_path))
     assert s3.put_attempts == 2
 
 
 def test_other_put_errors_are_not_retried_quickly(tmp_path):
     s3 = FakeS3(fail_keys=[KEY])
-    up = Uploader(s3, "bucket", "vehiclepos", tmp_path, denial_retry_delay=0)
+    up = Uploader(s3, "bucket", PREFIXES, tmp_path, denial_retry_delay=0)
     assert not up.upload(make_file(tmp_path))
     assert s3.put_attempts == 1
+
+
+PRAGUE_KEY = "vehiclepos/city=prague/feed=all/date=2026-10-16/all_2026-10-16T12-10+0200.csv.gz"
+
+
+def test_each_city_uploads_under_its_own_prefix(tmp_path):
+    s3 = FakeS3()
+    up = Uploader(s3, "bucket", PREFIXES, tmp_path)
+    assert up.upload(make_file(tmp_path, "all_2026-10-16T12-10+0200.csv.gz", "all", city="prague"))
+    assert up.upload(make_file(tmp_path))
+    assert set(s3.objects) == {PRAGUE_KEY, KEY}
+
+
+def test_startup_scan_finds_every_city(tmp_path):
+    s3 = FakeS3()
+    up = Uploader(s3, "bucket", PREFIXES, tmp_path)
+    make_file(tmp_path)
+    make_file(tmp_path, "all_2026-10-16T12-10+0200.csv.gz", "all", city="prague")
+    up.start()
+    up.stop(timeout=2)
+    assert set(s3.objects) == {PRAGUE_KEY, KEY}
+
+
+def test_file_of_unknown_city_is_left_in_place(tmp_path):
+    s3 = FakeS3()
+    up = Uploader(s3, "bucket", PREFIXES, tmp_path, backoff_initial=0.01)
+    stray = make_file(tmp_path, "all_2026-10-16T12-10+0200.csv.gz", "all", city="atlantis")
+    assert not up.upload(stray)
+    up.start()
+    up.stop(timeout=1)
+    assert stray.exists() and s3.objects == {} and s3.put_attempts == 0
+    assert "atlantis" in up.status()["last_error"]
+    assert up.status()["pending"] == 0  # not retried forever
+
+
+def test_status_times_are_timezone_aware(tmp_path):
+    up = Uploader(FakeS3(), "bucket", PREFIXES, tmp_path)
+    up.upload(make_file(tmp_path))
+    assert up.status()["last_uploaded_at"].utcoffset() is not None
+    assert up.status()["prefixes"] == PREFIXES
+
+
+def test_disabled_uploader_counts_pending_files_of_every_city(tmp_path):
+    up = Uploader(None, None, PREFIXES, tmp_path)
+    make_file(tmp_path)
+    make_file(tmp_path, "all_2026-10-16T12-10+0200.csv.gz", "all", city="prague")
+    assert up.status()["pending"] == 2

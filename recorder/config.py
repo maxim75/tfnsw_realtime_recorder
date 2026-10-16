@@ -11,7 +11,6 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from .cities import City
-from .feeds import DEFAULT_FEEDS, KNOWN_FEEDS
 
 log = logging.getLogger(__name__)
 
@@ -49,7 +48,6 @@ class S3Config:
     bucket: str
     access_key_id: str
     secret_access_key: str
-    prefix: str
 
     @classmethod
     def from_env(cls, env: Mapping[str, str] | None = None) -> "S3Config | None":
@@ -72,14 +70,12 @@ def _s3_from_env(env: Mapping[str, str]) -> tuple[S3Config | None, list[str]]:
         bucket=get("S3_BUCKET"),
         access_key_id=get("S3_ACCESS_KEY_ID"),
         secret_access_key=get("S3_SECRET_ACCESS_KEY"),
-        prefix=get("S3_PREFIX").strip("/") or "vehiclepos",
-    )
+    )  # each city's prefix is in cities.toml (S3_PREFIX overrides Sydney's)
     return s3, missing
 
 
 @dataclass(frozen=True)
 class EnvConfig:
-    tfnsw_api_key: str  # may be empty; cities.toml now carries per-city credentials
     admin_user: str
     admin_password: str
     data_dir: Path
@@ -98,7 +94,6 @@ class EnvConfig:
             raise ConfigError("Missing environment variables: " + ", ".join(missing))
 
         return cls(
-            tfnsw_api_key=get("TFNSW_API_KEY"),
             admin_user=get("ADMIN_USER"),
             admin_password=get("ADMIN_PASSWORD"),
             data_dir=Path(get("DATA_DIR") or "/data"),
@@ -116,18 +111,14 @@ class Settings:
         return {"feeds": list(self.feeds), "interval": self.interval}
 
 
-DEFAULT_SETTINGS = Settings(feeds=DEFAULT_FEEDS, interval=30)
+def validate_settings(data: object, city: City) -> Settings:
+    """Validate a settings mapping for *city*; raises ``ValueError`` with a user-facing message.
 
-
-def validate_settings(data: object, city: City | None = None) -> Settings:
-    """Validate a settings mapping; raises ``ValueError`` with a user-facing message.
-
-    With *city*, feeds must be that city's feed ids (kept in the city's order);
-    without, the built-in Sydney feed list is used.
+    Feeds must be the city's feed ids; they are kept in the city's order.
     """
     if not isinstance(data, dict):
         raise ValueError("settings must be an object")
-    known = tuple(f.id for f in city.feeds) if city else KNOWN_FEEDS
+    known = tuple(f.id for f in city.feeds)
     feeds = data.get("feeds")
     interval = data.get("interval")
     if not isinstance(feeds, list) or not all(isinstance(f, str) for f in feeds):

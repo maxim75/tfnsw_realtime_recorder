@@ -2,11 +2,18 @@ import gzip
 import json
 from datetime import date, datetime
 
-from recorder.history import History
+from recorder.cities import load_cities
+from recorder.history import History as _History
 from recorder.playback import build_day, day_file, parse_args, read_window
 from recorder.windows import SYDNEY_TZ
 
 from test_history import FakeS3, csv_bytes, row, s3_key
+
+SYDNEY = load_cities(env={})["sydney"]
+
+
+def History(*args, **kwargs):
+    return _History(*args, city=SYDNEY, **kwargs)
 
 DAY = date(2026, 10, 16)
 W1800 = int(datetime(2026, 10, 16, 18, 0, tzinfo=SYDNEY_TZ).timestamp())
@@ -67,6 +74,7 @@ def test_parse_args():
     args = parse_args(["--date", "2026-10-16"])
     assert args.date == "2026-10-16" and args.data_dir is None
     assert parse_args([]).date == "today"
+    assert parse_args([]).city == "sydney" and parse_args(["--city", "prague"]).city == "prague"
 
 
 def test_build_skips_windows_that_may_still_change(tmp_path):
@@ -106,3 +114,19 @@ def test_resolve_date_uses_the_given_zone():
     now = datetime(2026, 10, 16, 23, 30, tzinfo=ZoneInfo("UTC")).timestamp()  # 01:30 on the 17th in Prague
     assert resolve_date("today", ZoneInfo("Europe/Prague"), now) == date(2026, 10, 17)
     assert resolve_date("today", ZoneInfo("America/New_York"), now) == date(2026, 10, 16)
+
+
+def test_main_builds_into_the_city_folder(tmp_path, monkeypatch):
+    import recorder.config as config
+    import recorder.uploader as uploader
+    from recorder.playback import main
+
+    monkeypatch.setattr(config, "load_dotenv", lambda *a, **k: None)
+    for name, value in {"S3_BUCKET": "bucket", "S3_ACCESS_KEY_ID": "id", "S3_SECRET_ACCESS_KEY": "s"}.items():
+        monkeypatch.setenv(name, value)
+    monkeypatch.delenv("S3_PREFIX", raising=False)
+    monkeypatch.setattr(uploader, "make_s3_client", lambda s3: fixture_s3())
+    assert main(["--date", "2026-10-16", "--data-dir", str(tmp_path)]) == 0
+    assert read_window(tmp_path / "sydney", W1800) is not None
+    assert main(["--city", "prague", "--date", "2026-10-16", "--data-dir", str(tmp_path)]) == 0
+    assert (tmp_path / "prague" / "playback" / "2026-10-16.sqlite").is_file()

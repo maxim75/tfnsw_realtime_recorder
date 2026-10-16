@@ -7,12 +7,12 @@ import re
 import threading
 import time
 from collections.abc import Callable
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 from .config import S3Config
 from .recorder import terminate_process
-from .windows import SYDNEY_TZ
+from .storage import city_of
 
 log = logging.getLogger(__name__)
 
@@ -52,6 +52,13 @@ def retry_denials(fn, *args, delay: float = 0.5, **kwargs):
             time.sleep(delay * (attempt + 1))
 
 
+PENDING_GLOB = "*/complete/*/*.csv.gz"  # DATA_DIR/<city>/complete/<feed_dir>/<file>
+
+
+def _now() -> datetime:
+    return datetime.now(tz=timezone.utc)
+
+
 def object_key(prefix: str, path: Path) -> str:
     """``{prefix}/feed={feed_dir}/date={YYYY-MM-DD}/{name}`` for a file in ``complete/<feed_dir>/``."""
     feed_dir = path.parent.name
@@ -88,13 +95,16 @@ def make_s3_client(s3: S3Config):
 
 
 class Uploader:
-    """Queue + worker thread. A file is deleted locally only after a successful upload."""
+    """Queue + worker thread. A file is deleted locally only after a successful upload.
+
+    Files live in ``DATA_DIR/<city>/complete/``; *prefixes* maps a city id to its S3 prefix.
+    """
 
     def __init__(
         self,
         client,
         bucket: str | None,
-        prefix: str,
+        prefixes: dict[str, str],
         data_dir: Path,
         *,
         backoff_initial: float = 5.0,
@@ -104,7 +114,7 @@ class Uploader:
     ) -> None:
         self._client = client
         self._bucket = bucket
-        self._prefix = prefix
+        self._prefixes = dict(prefixes)
         self._data_dir = data_dir
         self._backoff_initial = backoff_initial
         self._backoff_max = backoff_max
@@ -136,9 +146,9 @@ class Uploader:
 
     def start(self) -> None:
         if not self.enabled:
-            log.warning("S3 not configured: completed files stay in %s", self._data_dir / "complete")
+            log.warning("S3 not configured: completed files stay in %s", self._data_dir / "*" / "complete")
             return
-        for path in sorted(self._data_dir.glob("complete/*/*.csv.gz")):
+        for path in sorted(self._data_dir.glob(PENDING_GLOB)):
             self._queue.put(path)
         self._thread = threading.Thread(target=self._run, name="uploader", daemon=True)
         self._thread.start()
@@ -150,11 +160,26 @@ class Uploader:
         if self._thread is not None:
             self._thread.join(timeout + 1)
 
+    def _key(self, path: Path) -> str | None:
+        """S3 key of *path*, or None (logged) when it is not in a known city's folder."""
+        try:
+            city = city_of(path, self._data_dir)
+            prefix = self._prefixes[city]
+        except (ValueError, KeyError):
+            log.error("Not uploading %s: not in the folder of a configured city", path)
+            with self._lock:
+                self._last_error = f"no configured city for {path}"
+                self._last_error_at = _now()
+            return None
+        return object_key(prefix, path)
+
     def upload(self, path: Path) -> bool:
         from botocore.exceptions import ClientError
 
+        key = self._key(path)
+        if key is None:
+            return False
         try:
-            key = object_key(self._prefix, path)
             while self._retry_denials(self._exists, key, ClientError):
                 key = next_part_key(key)
             self._retry_denials(
@@ -165,7 +190,7 @@ class Uploader:
             log.warning("Upload of %s failed: %s", path.name, exc)
             with self._lock:
                 self._last_error = str(exc)
-                self._last_error_at = datetime.now(tz=SYDNEY_TZ)
+                self._last_error_at = _now()
             return False
         try:
             path.unlink(missing_ok=True)
@@ -174,12 +199,12 @@ class Uploader:
             with self._lock:
                 self._uploaded.add(path)
                 self._last_error = f"uploaded but local delete failed: {exc}"
-                self._last_error_at = datetime.now(tz=SYDNEY_TZ)
+                self._last_error_at = _now()
         log.info("Uploaded %s", key)
         with self._lock:
             self._uploaded_total += 1
             self._last_uploaded_key = key
-            self._last_uploaded_at = datetime.now(tz=SYDNEY_TZ)
+            self._last_uploaded_at = _now()
         return True
 
     def _retry_denials(self, fn, *args, **kwargs):
@@ -217,6 +242,8 @@ class Uploader:
             try:
                 if path in self._uploaded or not path.exists():
                     continue
+                if self._key(path) is None:
+                    continue  # left in place; a config change and restart picks it up
                 if self.upload(path):
                     backoff = self._backoff_initial
                     continue
@@ -224,7 +251,7 @@ class Uploader:
                 log.exception("Uploader error on %s", path.name)
                 with self._lock:
                     self._last_error = str(exc) or type(exc).__name__
-                    self._last_error_at = datetime.now(tz=SYDNEY_TZ)
+                    self._last_error_at = _now()
             if self._stop.is_set():
                 continue  # shutting down: try the rest; this file stays on disk for the next start
             self._queue.put(path)
@@ -235,13 +262,13 @@ class Uploader:
         pending = (
             self._queue.qsize()
             if self.enabled
-            else len(list(self._data_dir.glob("complete/*/*.csv.gz")))
+            else len(list(self._data_dir.glob(PENDING_GLOB)))
         )
         with self._lock:
             return {
                 "s3_configured": self.enabled,
                 "bucket": self._bucket,
-                "prefix": self._prefix,
+                "prefixes": dict(self._prefixes),
                 "pending": pending,
                 "uploaded_total": self._uploaded_total,
                 "last_uploaded_key": self._last_uploaded_key,

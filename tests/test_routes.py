@@ -1,6 +1,8 @@
 import io
 import json
 import logging
+import threading
+import time
 import zipfile
 from pathlib import Path
 
@@ -8,7 +10,7 @@ import pytest
 import requests
 
 from recorder.cities import load_cities
-from recorder.routes import MODE_BY_ROUTE_TYPE, RouteInfo
+from recorder.routes import MODE_BY_ROUTE_TYPE, RouteInfo, RouteRefresher
 
 ROUTES_TXT = (
     "route_id,agency_id,route_short_name,route_long_name,route_type\n"
@@ -217,3 +219,37 @@ def test_refresh_replaces_mapping(prague, tmp_path):
     assert info.label("L1") == "Z"
     assert info.label("L992") == "L992"
     assert isinstance(Path(tmp_path / "routes.json").read_text(), str)
+
+
+
+class CountingRoutes:
+    def __init__(self, until=1):
+        self.calls = 0
+        self.until = until
+        self.reached = threading.Event()
+
+    def refresh(self):
+        self.calls += 1
+        if self.calls >= self.until:
+            self.reached.set()
+
+
+def test_refresher_refreshes_at_start_and_then_periodically():
+    routes = CountingRoutes(until=3)
+    refresher = RouteRefresher(routes, "prague", interval=0.01)
+    refresher.start()
+    assert routes.reached.wait(5)
+    refresher.stop(timeout=5)
+    assert not refresher.alive
+    calls = routes.calls
+    time.sleep(0.05)
+    assert routes.calls == calls  # stopped
+
+
+def test_refresher_does_not_wait_for_the_first_interval():
+    routes = CountingRoutes()
+    refresher = RouteRefresher(routes, "prague", interval=3600)
+    refresher.start()
+    assert routes.reached.wait(5)
+    refresher.stop(timeout=5)
+    assert routes.calls == 1 and not refresher.alive

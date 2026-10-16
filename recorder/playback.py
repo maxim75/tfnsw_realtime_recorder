@@ -2,7 +2,8 @@
 
     uv run build_playback.py --date 2026-10-16
 
-downloads one day of recordings from S3 and writes ``DATA_DIR/playback/<date>.sqlite``:
+downloads one day of recordings from S3 and writes ``DATA_DIR/<city>/playback/<date>.sqlite``
+(``--city``, default sydney):
 one row per recorded 10-minute window holding the gzip JSON body that
 ``/api/history/window`` serves, so playback of that day needs no S3 reads and
 each window loads instantly. Windows missing from the file (e.g. the rest of
@@ -94,16 +95,19 @@ def resolve_date(value: str, tz: ZoneInfo, now: float | None = None) -> date:
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Build an optimized local playback file for one day from S3.")
+    parser.add_argument("--city", default="sydney", help="city id from cities.toml (default: sydney)")
     parser.add_argument("--date", default="today",
-                        help="Sydney-local date: YYYY-MM-DD, 'today' (default) or 'yesterday'")
+                        help="city-local date: YYYY-MM-DD, 'today' (default) or 'yesterday'")
     parser.add_argument("--data-dir", type=Path,
-                        help="data directory (default: DATA_DIR, or ./data)")
+                        help="data directory holding the city folders (default: DATA_DIR, or ./data)")
     return parser.parse_args(argv)
 
 
 def main(argv: list[str] | None = None) -> int:
+    from .cities import load_cities
     from .config import ConfigError, S3Config, load_dotenv
     from .history import History
+    from .storage import city_dir
     from .uploader import make_s3_client
 
     logging.basicConfig(level=logging.INFO, format="%(message)s")
@@ -111,7 +115,12 @@ def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
     load_dotenv()
     try:
-        day = resolve_date(args.date, SYDNEY_TZ)
+        city = load_cities()[args.city]
+    except KeyError:
+        log.error("Unknown city %r", args.city)
+        return 2
+    try:
+        day = resolve_date(args.date, city.timezone)
         s3 = S3Config.from_env()
     except (ValueError, ConfigError) as exc:
         log.error("%s", exc)
@@ -119,11 +128,11 @@ def main(argv: list[str] | None = None) -> int:
     if s3 is None:
         log.error("S3_BUCKET is not set (environment or .env)")
         return 2
-    data_dir = args.data_dir or Path(os.environ.get("DATA_DIR") or "data")
+    data_dir = city_dir(args.data_dir or Path(os.environ.get("DATA_DIR") or "data"), city.id)
     path = day_file(data_dir, day)
     started = time.monotonic()
     # data_dir is also read for recordings not uploaded yet (when run next to the recorder).
-    history = History(make_s3_client(s3), s3.bucket, s3.prefix, data_dir)
+    history = History(make_s3_client(s3), s3.bucket, city.s3_prefix, data_dir, city=city)
     windows, reports = build_day(history, day, path)
     log.info("Wrote %d windows, %d reports, %.1f MB to %s in %.0f s",
              windows, reports, path.stat().st_size / 1e6, path, time.monotonic() - started)

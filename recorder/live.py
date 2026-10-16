@@ -5,7 +5,7 @@ reports per vehicle (so a freshly opened map can interpolate straight away) and
 a short list of numbered batches of new reports that the SSE stream sends on.
 
 A report is a compact list: ``[vehicle_id, route_id, gps_epoch_s, lon, lat,
-bearing, speed]``.
+bearing, speed, label, mode]`` (line name and mode from the city's `RouteInfo`).
 """
 from __future__ import annotations
 
@@ -13,11 +13,17 @@ import threading
 from collections import deque
 from datetime import datetime
 
+from .cities import City
 from .feeds import STALE_AFTER_S
+from .routes import RouteInfo
 
 
 class LiveHub:
-    def __init__(self, *, history: int = 6, max_batches: int = 50, forget_after_s: float = 900) -> None:
+    def __init__(
+        self, city: City, routes: RouteInfo, *, history: int = 6, max_batches: int = 50, forget_after_s: float = 900
+    ) -> None:
+        self._city = city
+        self._routes = routes
         self._history = history
         self._forget_after_s = forget_after_s
         self._lock = threading.Lock()
@@ -41,6 +47,7 @@ class LiveHub:
 
     def publish(self, feed: str, fetched_at: datetime, positions) -> None:
         now = fetched_at.timestamp()
+        feed_info = self._city.feed(feed)
         new = []
         with self._lock:
             vehicles = self._vehicles.setdefault(feed, {})
@@ -57,6 +64,7 @@ class LiveHub:
                 report = [
                     vid, p.route_id or "", ts, round(p.longitude, 5), round(p.latitude, 5),
                     p.bearing, None if p.speed is None else round(p.speed, 1),
+                    self._routes.label(p.route_id), self._routes.mode(feed_info, p.route_id),
                 ]
                 history.append(report)
                 new.append(report)

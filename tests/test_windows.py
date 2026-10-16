@@ -47,14 +47,6 @@ def test_window_end_across_start_of_daylight_saving():
     assert window_label(window_end(last_aest)) == "2026-10-04T03-00+1100"
 
 
-def test_feed_versions():
-    from recorder.feeds import KNOWN_FEEDS, V2_FEEDS, feed_version
-
-    assert V2_FEEDS == {"sydneytrains", "metro", "lightrail/innerwest"}
-    assert V2_FEEDS <= set(KNOWN_FEEDS)
-    assert feed_version("metro") == "v2" and feed_version("buses") == "v1"
-
-
 def test_prague_floors_and_labels_in_prague_time():
     # 10:19:59Z = 12:19:59 CEST
     start = window_start(utc(2026, 10, 16, 10, 19, 59), PRAGUE_TZ)

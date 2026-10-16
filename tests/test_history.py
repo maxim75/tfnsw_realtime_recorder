@@ -2,13 +2,19 @@ import csv
 import gzip
 import io
 import json
+import sqlite3
 from datetime import datetime
 
 import pytest
 
+from recorder.cities import load_cities
 from recorder.history import History
+from recorder.routes import RouteInfo
 from recorder.windows import SYDNEY_TZ
 from recorder.writer import FIELDS
+
+CITIES = load_cities(env={"TFNSW_API_KEY": "k"})
+SYDNEY, PRAGUE = CITIES["sydney"], CITIES["prague"]
 
 START = int(datetime(2026, 10, 16, 18, 0, tzinfo=SYDNEY_TZ).timestamp())  # window 18:00-18:10
 LABEL = "2026-10-16T18-00+1100"
@@ -60,7 +66,7 @@ def decode(body):
 def make(tmp_path, objects=None, now=START + 3600):
     clock = [now]
     s3 = FakeS3(objects or {}) if objects is not None else None
-    hist = History(s3, "bucket" if s3 else None, "vehiclepos", tmp_path, clock=lambda: clock[0])
+    hist = History(s3, "bucket" if s3 else None, "vehiclepos", tmp_path, city=SYDNEY, clock=lambda: clock[0])
     return hist, s3, clock
 
 
@@ -88,7 +94,7 @@ def test_window_merges_s3_parts_and_local_files_without_duplicates(tmp_path):
     assert [(r[0], r[2]) for r in buses] == [
         ("b", START + 5), ("a", START + 10), ("a", START + 250), ("c", START + 360), ("d", START + 480),
     ]
-    assert buses[0] == ["b", "2510_333", START + 5, 151.2, -33.8, 90.0, 5.5]
+    assert buses[0] == ["b", "2510_333", START + 5, 151.2, -33.8, 90.0, 5.5, "333", "bus"]
     assert [r[0] for r in body["feeds"]["metro"]] == ["m"]
 
 
@@ -134,3 +140,51 @@ def test_local_files_only_without_s3(tmp_path):
     body = decode(hist.window(START))
     assert [r[0] for r in body["feeds"]["sydneytrains"]] == ["t"]
     assert "buses" not in body["feeds"]
+
+
+def test_prague_window_reads_prague_prefix_and_labels_lines_from_routes_cache(tmp_path):
+    (tmp_path / "routes.json").write_text(json.dumps(
+        {"checked": 0, "last_modified": None, "routes": {"L992": ["B", "metro"]}}
+    ))
+    label = "2026-10-16T12-10+0200"
+    start = int(datetime.fromisoformat("2026-10-16T12:10:00+02:00").timestamp())
+    key = f"vehiclepos/city=prague/feed=all/date=2026-10-16/all_{label}.csv.gz"
+    rows = [
+        row("metro-B-25-25", fetched="2026-10-16T12:10:20+02:00", ts="2026-10-16T12:10:10+02:00") | {"route_id": "L992"},
+        row("bus-7", fetched="2026-10-16T12:10:20+02:00", ts="2026-10-16T12:10:12+02:00") | {"route_id": "L9999"},
+    ]
+    s3 = FakeS3({key: gzip.compress(csv_bytes(rows)),
+                 s3_key("buses", label=label): gzip.compress(csv_bytes([row("sydney-bus")]))})
+    hist = History(s3, "bucket", PRAGUE.s3_prefix, tmp_path, city=PRAGUE, routes=RouteInfo(PRAGUE, tmp_path),
+                   clock=lambda: start + 3600)
+    assert hist.tz.key == "Europe/Prague"
+    body = decode(hist.window(start))
+    assert list(body["feeds"]) == ["all"]
+    assert [r[0] for r in body["feeds"]["all"]] == ["metro-B-25-25", "bus-7"]
+    assert body["feeds"]["all"][0][7:] == ["B", "metro"]
+    assert body["feeds"]["all"][1][7:] == ["L9999", "bus"]
+
+
+def test_routes_default_to_the_city_folder_cache(tmp_path):
+    (tmp_path / "routes.json").write_text(json.dumps(
+        {"checked": 0, "last_modified": None, "routes": {"2510_333": ["333 Express", "bus"]}}
+    ))
+    hist, _, _ = make(tmp_path, {s3_key("buses"): gzip.compress(csv_bytes([row("a")]))})
+    assert decode(hist.window(START))["feeds"]["buses"][0][7:] == ["333 Express", "bus"]
+
+
+def test_day_file_built_before_labels_existed_is_served_with_label_and_mode(tmp_path):
+    from recorder.history import encode_window
+    from recorder.playback import day_file
+
+    path = day_file(tmp_path, datetime.fromtimestamp(START, tz=SYDNEY_TZ).date())
+    path.parent.mkdir(parents=True)
+    old = encode_window(START, {"buses": [["a", "2510_333", START + 10, 151.2, -33.8, 90.0, 5.5]]})
+    with sqlite3.connect(path) as db:
+        db.execute("CREATE TABLE windows (start INTEGER PRIMARY KEY, reports INTEGER, body BLOB)")
+        db.execute("INSERT INTO windows VALUES (?, 1, ?)", (START, old))
+    db.close()
+    hist, _, _ = make(tmp_path, objects=None)
+    assert decode(hist.window(START))["feeds"]["buses"] == [
+        ["a", "2510_333", START + 10, 151.2, -33.8, 90.0, 5.5, "333", "bus"]
+    ]

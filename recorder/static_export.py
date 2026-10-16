@@ -1,6 +1,7 @@
 """Export one recorded day as static files for the GitHub Pages playback site.
 
     uv run export_static.py --date 2026-10-16 --out ../tfnsw-playback-map/data
+    uv run export_static.py --city prague --date 2026-10-16 --out /tmp/prague
 
 writes ``<out>/index.json`` (day bounds, windows with data, report counts) and
 ``<out>/w/<window start epoch>.json.gz``, one compact gzip file per 10-minute
@@ -32,7 +33,7 @@ from datetime import date, datetime
 from pathlib import Path
 
 from .playback import day_windows, resolve_date
-from .windows import SYDNEY_TZ, WINDOW
+from .windows import WINDOW
 
 log = logging.getLogger(__name__)
 
@@ -45,7 +46,10 @@ def _round(v: float) -> int:
 
 
 def encode_window(start: int, feeds: dict[str, list[list]]) -> dict:
-    """Compact form of ``{feed: [[vehicle_id, route_id, ts, lon, lat, bearing, speed], ...]}``."""
+    """Compact form of ``{feed: [[vehicle_id, route_id, ts, lon, lat, bearing, speed, ...], ...]}``.
+
+    Fields after speed (label, mode) are not stored yet.
+    """
     out = {"start": start, "feeds": list(feeds), "vehicles": [], "n": [], "t": [], "x": [], "y": [], "b": [], "s": []}
     for fi, reports in enumerate(feeds.values()):
         by_vehicle = defaultdict(list)
@@ -56,7 +60,7 @@ def encode_window(start: int, feeds: dict[str, list[list]]) -> dict:
             out["vehicles"].append([fi, vid, route])
             out["n"].append(len(runs))
             pt, px, py = start, 0, 0
-            for _, _, ts, lon, lat, bearing, speed in runs:
+            for ts, lon, lat, bearing, speed in (r[2:7] for r in runs):
                 xi, yi = _round(lon * SCALE), _round(lat * SCALE)
                 out["t"].append(ts - pt)
                 out["x"].append(xi - px)
@@ -124,16 +128,19 @@ def export_day(history, day: date, out: Path, *, now: float | None = None) -> di
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Export one recorded day as static files for the playback site.")
+    parser.add_argument("--city", default="sydney", help="city id from cities.toml (default: sydney)")
     parser.add_argument("--date", default="yesterday",
-                        help="Sydney-local date: YYYY-MM-DD, 'today' or 'yesterday' (default)")
+                        help="city-local date: YYYY-MM-DD, 'today' or 'yesterday' (default)")
     parser.add_argument("--out", type=Path, required=True, help="output directory, e.g. ../tfnsw-playback-map/data")
-    parser.add_argument("--data-dir", type=Path, help="recorder data directory with playback day files (default: DATA_DIR or ./data)")
+    parser.add_argument("--data-dir", type=Path, help="recorder data directory with the city folders (default: DATA_DIR or ./data)")
     return parser.parse_args(argv)
 
 
 def main(argv: list[str] | None = None) -> int:
+    from .cities import load_cities
     from .config import ConfigError, S3Config, load_dotenv
     from .history import History
+    from .storage import city_dir
     from .uploader import make_s3_client
 
     logging.basicConfig(level=logging.INFO, format="%(message)s")
@@ -141,14 +148,19 @@ def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
     load_dotenv()
     try:
-        day = resolve_date(args.date, SYDNEY_TZ)
+        city = load_cities()[args.city]
+    except KeyError:
+        log.error("Unknown city %r", args.city)
+        return 2
+    try:
+        day = resolve_date(args.date, city.timezone)
         s3 = S3Config.from_env()
     except (ValueError, ConfigError) as exc:
         log.error("%s", exc)
         return 2
-    data_dir = args.data_dir or Path(os.environ.get("DATA_DIR") or "data")
+    data_dir = city_dir(args.data_dir or Path(os.environ.get("DATA_DIR") or "data"), city.id)
     client = make_s3_client(s3) if s3 else None
-    history = History(client, s3.bucket if s3 else None, s3.prefix if s3 else "", data_dir)
+    history = History(client, s3.bucket if s3 else None, city.s3_prefix, data_dir, city=city)
     started = time.monotonic()
     summary = export_day(history, day, args.out)
     size = sum(p.stat().st_size for p in (args.out / "w").glob("*.json.gz"))

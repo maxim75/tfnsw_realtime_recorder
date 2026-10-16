@@ -8,7 +8,7 @@ dependencies = [
     "boto3>=1.43.114",
     "fastapi>=0.143.2",
     "gtfs-realtime-bindings>=3.0.0",
-    "tfnsw-trip-planner[realtime]>=1.4.0",
+    "requests>=2.34.2",
     "tzdata>=2026.5",
     "uvicorn>=0.54.0",
 ]

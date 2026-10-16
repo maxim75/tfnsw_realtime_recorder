@@ -1,8 +1,19 @@
+import json
 from datetime import datetime, timedelta, timezone
 
-from tfnsw_trip_planner import VehiclePosition
+from recorder.cities import load_cities
+from recorder.gtfsrt import Position
+from recorder.live import LiveHub as _LiveHub
+from recorder.routes import RouteInfo
 
-from recorder.live import LiveHub
+CITIES = load_cities(env={"TFNSW_API_KEY": "k"})
+SYDNEY, PRAGUE = CITIES["sydney"], CITIES["prague"]
+
+
+def LiveHub(city=SYDNEY, routes=None, **kwargs):
+    from pathlib import Path
+
+    return _LiveHub(city, routes or RouteInfo(city, Path("/nonexistent")), **kwargs)
 
 
 def utc(*args):
@@ -13,7 +24,7 @@ T0 = utc(2026, 10, 16, 8, 0)
 
 
 def vp(vehicle="v1", ts=T0, lat=-33.8, lon=151.2, route="2510_333", bearing=90.0, speed=5.5):
-    return VehiclePosition(
+    return Position(
         vehicle_id=vehicle, trip_id="t", route_id=route, latitude=lat, longitude=lon,
         bearing=bearing, speed=speed, timestamp=ts,
     )
@@ -28,7 +39,9 @@ def test_publish_compacts_reports_and_bumps_seq():
     hub.publish("buses", T0 + timedelta(seconds=10), [vp("a", lat=-33.812345678, lon=151.212345678)])
     snap = hub.snapshot()
     assert snap["seq"] == 1
-    assert reports(snap, "buses") == [["a", "2510_333", int(T0.timestamp()), 151.21235, -33.81235, 90.0, 5.5]]
+    assert reports(snap, "buses") == [
+        ["a", "2510_333", int(T0.timestamp()), 151.21235, -33.81235, 90.0, 5.5, "333", "bus"]
+    ]
 
 
 def test_skips_missing_fix_stale_and_unchanged_reports():
@@ -80,3 +93,24 @@ def test_close():
     assert not hub.closed
     hub.close()
     assert hub.closed
+
+
+def test_reports_carry_label_and_mode_from_the_city_route_info(tmp_path):
+    (tmp_path / "routes.json").write_text(json.dumps(
+        {"checked": 0, "last_modified": None, "routes": {"L992": ["B", "metro"], "L22": ["22", "tram"]}}
+    ))
+    hub = LiveHub(PRAGUE, RouteInfo(PRAGUE, tmp_path))
+    hub.publish("all", T0 + timedelta(seconds=10), [
+        vp("metro-B-25-25", route="L992", lat=50.08, lon=14.44),
+        vp("bus-1", route="L9999", lat=50.07, lon=14.43),  # not in routes.txt
+    ])
+    rows = {r[0]: r for r in reports(hub.snapshot(), "all")}
+    assert rows["metro-B-25-25"][7:] == ["B", "metro"]
+    assert rows["bus-1"][7:] == ["L9999", "bus"]  # raw id, the feed's mode
+    assert hub.batches_after(0)[0]["reports"][0][7:] == ["B", "metro"]
+
+
+def test_sydney_feed_mode_is_used_for_live_reports():
+    hub = LiveHub()
+    hub.publish("ferries/MFF", T0 + timedelta(seconds=10), [vp("f", route="MFF_F99")])
+    assert reports(hub.snapshot(), "ferries/MFF")[0][7:] == ["F99", "ferry"]

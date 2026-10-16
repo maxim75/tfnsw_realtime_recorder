@@ -20,6 +20,7 @@ from recorder.gtfsrt import USER_AGENT
 log = logging.getLogger(__name__)
 
 REFRESH_INTERVAL = 24 * 3600  # s between checks of the static feed
+CHECK_INTERVAL = 3600  # s between RouteRefresher calls; refresh() itself skips a fresh cache
 DOWNLOAD_TIMEOUT = (10, 120)  # connect, read (s)
 
 
@@ -147,6 +148,39 @@ class RouteInfo:
         self._last_modified = last_modified
         self._save_cache()
         log.info("loaded %d routes for %s", len(routes), self._city.id)
+
+
+class RouteRefresher:
+    """Daemon thread that calls ``routes.refresh()`` at start and then every *interval* s.
+
+    Recording never waits for it. ``stop()`` does not wait for a download in progress
+    (the thread is a daemon and the cached file is replaced atomically).
+    """
+
+    def __init__(self, routes: RouteInfo, city_id: str, *, interval: float = CHECK_INTERVAL) -> None:
+        self._routes = routes
+        self._city_id = city_id
+        self._interval = interval
+        self._stop = threading.Event()
+        self._thread: threading.Thread | None = None
+
+    def start(self) -> None:
+        self._thread = threading.Thread(target=self._run, name=f"routes-{self._city_id}", daemon=True)
+        self._thread.start()
+
+    def stop(self, timeout: float = 1.0) -> None:
+        self._stop.set()
+        if self._thread is not None:
+            self._thread.join(timeout)
+
+    @property
+    def alive(self) -> bool:
+        return self._thread is not None and self._thread.is_alive()
+
+    def _run(self) -> None:
+        while not self._stop.is_set():
+            self._routes.refresh()  # never raises
+            self._stop.wait(self._interval)
 
 
 def _read_routes(zip_path: Path) -> dict[str, tuple[str, str]]:

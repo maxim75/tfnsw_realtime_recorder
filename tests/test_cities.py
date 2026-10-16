@@ -3,7 +3,28 @@ from pathlib import Path
 import pytest
 
 from recorder.cities import City, Feed, load_cities
-from recorder.feeds import DEFAULT_FEEDS, KNOWN_FEEDS, feed_version
+
+# Sydney's feeds and defaults before multi-city (every gtfs/vehiclepos feed that answered
+# on 2026-10-16); cities.toml must keep them.
+KNOWN_FEEDS = (
+    "buses", "sydneytrains", "metro", "nswtrains", "ferries/sydneyferries", "ferries/MFF",
+    "lightrail/cbdandsoutheast", "lightrail/innerwest", "lightrail/newcastle", "lightrail/parramatta",
+    "regionbuses/centralwestandorana", "regionbuses/centralwestandorana2", "regionbuses/farwest",
+    "regionbuses/newcastlehunter", "regionbuses/newenglandnorthwest", "regionbuses/northcoast",
+    "regionbuses/northcoast2", "regionbuses/northcoast3", "regionbuses/riverinamurray",
+    "regionbuses/riverinamurray2", "regionbuses/southeasttablelands", "regionbuses/southeasttablelands2",
+    "regionbuses/sydneysurrounds",
+)
+DEFAULT_FEEDS = (
+    "buses", "sydneytrains", "metro", "nswtrains", "ferries/sydneyferries", "ferries/MFF",
+    "lightrail/cbdandsoutheast", "lightrail/innerwest", "lightrail/parramatta", "regionbuses/sydneysurrounds",
+)
+# Read from /v2/: sydneytrains and lightrail/innerwest 404 on v1, v1 metro is frozen.
+V2_FEEDS = {"sydneytrains", "metro", "lightrail/innerwest"}
+
+
+def feed_version(feed):
+    return "v2" if feed in V2_FEEDS else "v1"
 
 KEY_ENV = {"TFNSW_API_KEY": "secret"}
 
@@ -59,7 +80,7 @@ def test_loads_sydney_and_prague_from_repo_file():
     assert prague.disabled_reason is None
 
 
-def test_sydney_feed_urls_and_modes_match_feeds_module():
+def test_sydney_feed_urls_and_modes_match_the_legacy_feed_list():
     sydney = load_cities(env=KEY_ENV)["sydney"]
     for feed in sydney.feeds:
         assert feed.url == (

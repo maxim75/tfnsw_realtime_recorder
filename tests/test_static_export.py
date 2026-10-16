@@ -2,11 +2,18 @@ import gzip
 import json
 from datetime import date, datetime
 
-from recorder.history import History
+from recorder.cities import load_cities
+from recorder.history import History as _History
 from recorder.static_export import decode_window, encode_window, export_day
 from recorder.windows import SYDNEY_TZ
 
 from test_history import FakeS3, csv_bytes, row, s3_key
+
+SYDNEY = load_cities(env={})["sydney"]
+
+
+def History(*args, **kwargs):
+    return _History(*args, city=SYDNEY, **kwargs)
 
 DAY = date(2026, 10, 16)
 W1800 = int(datetime(2026, 10, 16, 18, 0, tzinfo=SYDNEY_TZ).timestamp())
@@ -69,3 +76,15 @@ def test_export_day_replaces_previous_export(tmp_path):
     export_day(History(FakeS3({}), "bucket", "vehiclepos", tmp_path / "x"), DAY, out, now=W1800 + 86400)
     assert not (out / "w" / "123.json.gz").exists()
     assert json.loads((out / "index.json").read_text())["windows"] == {}
+
+
+def test_reports_with_label_and_mode_keep_the_v1_window_format():
+    labelled = {f: [r + ["333", "bus"] for r in reports] for f, reports in FEEDS.items()}
+    assert encode_window(W1800, labelled) == encode_window(W1800, FEEDS)
+
+
+def test_parse_args_city_defaults_to_sydney():
+    from recorder.static_export import parse_args
+
+    assert parse_args(["--out", "x"]).city == "sydney"
+    assert parse_args(["--out", "x", "--city", "prague"]).city == "prague"
