@@ -10,8 +10,8 @@ faster than the feed refreshes does not create duplicate rows.
 
 Usage:
     export TFNSW_API_KEY=...
-    uv run main.py                              # buses, every 15s, until Ctrl+C
-    uv run main.py -m buses -m sydneytrains -i 10
+    uv run main.py                              # all FEEDS, every 30s, until Ctrl+C
+    uv run main.py -m buses -m sydneytrains -i 15
     uv run main.py -m ferries/sydneyferries --duration 3600
 """
 from __future__ import annotations
@@ -30,6 +30,24 @@ from zoneinfo import ZoneInfo
 from tfnsw_trip_planner import TripPlannerClient, TripPlannerError
 
 SYDNEY_TZ = ZoneInfo("Australia/Sydney")
+
+# Feeds recorded by default (Sydney-area services).
+FEEDS = [
+    "buses",
+    "sydneytrains",
+    "metro",
+    "nswtrains",
+    "ferries/sydneyferries",
+    "ferries/MFF",
+    "lightrail/cbdandsoutheast",
+    "lightrail/innerwest",
+    "lightrail/parramatta",
+    "regionbuses/sydneysurrounds",
+]
+
+# TfNSW Open Data default limits per API key.
+MAX_REQUESTS_PER_SECOND = 5
+DAILY_REQUEST_QUOTA = 60_000
 
 FIELDS = [
     "fetched_at",
@@ -111,12 +129,13 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--mode",
         action="append",
         help=(
-            "Feed to record; repeat for several (default: buses). Known feeds: "
-            + ", ".join(TripPlannerClient.VEHICLE_POSITION_MODES)
+            "Feed to record; repeat for several (default: all of "
+            + ", ".join(FEEDS)
+            + ")"
         ),
     )
     parser.add_argument(
-        "-i", "--interval", type=float, default=15.0, help="Seconds between polls (default 15)"
+        "-i", "--interval", type=float, default=30.0, help="Seconds between polls (default 30)"
     )
     parser.add_argument(
         "-d", "--duration", type=float, help="Stop after this many seconds (default: run forever)"
@@ -141,7 +160,16 @@ def main(argv: list[str] | None = None) -> int:
         log.error("Set TFNSW_API_KEY (environment or .env file)")
         return 2
 
-    recorders = [FeedRecorder(m, args.out) for m in (args.mode or ["buses"])]
+    recorders = [FeedRecorder(m, args.out) for m in (args.mode or FEEDS)]
+
+    per_day = len(recorders) * 86400 / args.interval
+    if per_day > DAILY_REQUEST_QUOTA:
+        log.warning(
+            "%d feeds every %gs is ~%d requests/day, above the default quota of %d; "
+            "use --interval %d or more for continuous recording",
+            len(recorders), args.interval, per_day, DAILY_REQUEST_QUOTA,
+            len(recorders) * 86400 // DAILY_REQUEST_QUOTA + 1,
+        )
 
     stop = False
 
@@ -157,10 +185,14 @@ def main(argv: list[str] | None = None) -> int:
     with TripPlannerClient(api_key=api_key) as client:
         while not stop:
             started = time.monotonic()
-            for rec in recorders:
+            for n, rec in enumerate(recorders):
+                if stop:
+                    break
+                if n:
+                    time.sleep(1 / MAX_REQUESTS_PER_SECOND)  # stay under the rate limit
                 try:
                     total, written = rec.record(client)
-                    log.info("%-26s vehicles=%5d new=%5d", rec.mode, total, written)
+                    log.info("%-34s vehicles=%5d new=%5d", rec.mode, total, written)
                 except TripPlannerError as exc:
                     # Transient API/network errors shouldn't kill a long recording.
                     log.warning("%s: %s", rec.mode, exc)
