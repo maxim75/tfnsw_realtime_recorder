@@ -25,9 +25,11 @@ class FakeClient:
     def __init__(self, responses):
         self.responses = responses
         self.calls = []
+        self.versions = {}
 
-    def vehicle_positions(self, mode):
+    def vehicle_positions(self, mode, version=None):
         self.calls.append(mode)
+        self.versions[mode] = version
         r = self.responses[mode]
         if isinstance(r, Exception):
             raise r
@@ -237,3 +239,31 @@ def test_stop_keeps_closing_writers_when_one_close_fails(tmp_path):
     assert not rec.alive
     completed = {p.name for p in (tmp_path / "complete").glob("*/*.csv.gz")}
     assert "metro_2026-10-16T12-10+1100.csv.gz" in completed
+
+
+def test_each_feed_is_fetched_from_its_api_version(tmp_path):
+    rec, store, _, _ = make(
+        tmp_path, {"buses": [vp("a")], "metro": [vp("m")], "sydneytrains": [vp("t")]},
+        feeds=("buses", "metro", "sydneytrains"),
+    )
+    rec.poll_once(store.get())
+    assert rec._client.versions == {"buses": "v1", "metro": "v2", "sydneytrains": "v2"}
+
+
+def test_feed_with_old_gps_data_is_flagged_stale(tmp_path):
+    # poll at 01:11Z; newest report 2 years old (the frozen v1 metro feed looked like this)
+    rec, store, _, _ = make(
+        tmp_path, {"metro": [vp("m", ts=utc(2024, 10, 16, 1, 10))], "buses": [vp("a", ts=utc(2026, 10, 16, 1, 10, 30))]},
+        feeds=("buses", "metro"),
+    )
+    rec.poll_once(store.get())
+    status = rec.status()
+    assert status["metro"].stale is True and status["metro"].data_age_s > 600
+    assert status["buses"].stale is False and status["buses"].data_age_s == 30
+
+
+def test_empty_feed_has_no_data_age(tmp_path):
+    rec, store, _, _ = make(tmp_path, {"buses": []})
+    rec.poll_once(store.get())
+    st = rec.status()["buses"]
+    assert st.data_age_s is None and st.stale is False

@@ -40,6 +40,16 @@ Also available:
 `regionbuses/riverinamurray`, `regionbuses/riverinamurray2`,
 `regionbuses/southeasttablelands`, `regionbuses/southeasttablelands2`
 
+Each feed is fetched from the API version that serves live data (`V2_FEEDS` in
+`recorder/feeds.py`): `sydneytrains`, `metro` and `lightrail/innerwest` from
+`/v2/gtfs/vehiclepos/`, everything else from `/v1/gtfs/vehiclepos/`. On
+2026-10-16, `sydneytrains` and `lightrail/innerwest` returned 404 on v1, v1
+`metro` had not updated for about two years, and no other feed existed on v2.
+
+The web page shows each feed's version and marks a feed **stale** when its
+newest GPS report is more than 10 minutes old (also logged as a warning).
+`ferries/MFF` was stale (about 107 days) when this was written.
+
 ## Run locally
 
 Put the variables in `.env`, then:

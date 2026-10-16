@@ -15,7 +15,7 @@ from pathlib import Path
 from tfnsw_trip_planner import TripPlannerError
 
 from .config import Settings, SettingsStore
-from .feeds import MAX_REQUESTS_PER_SECOND
+from .feeds import MAX_REQUESTS_PER_SECOND, STALE_AFTER_S, feed_version
 from .windows import SYDNEY_TZ
 from .writer import RotatingWriter
 
@@ -69,6 +69,8 @@ class FeedStatus:
     last_error: str | None = None
     last_error_at: datetime | None = None
     total_rows: int = 0
+    data_age_s: float | None = None  # poll time minus the newest GPS report
+    stale: bool = False
 
 
 class Recorder:
@@ -184,7 +186,7 @@ class Recorder:
         """Poll one feed. Returns (vehicles, new rows), or (None, 0) on error."""
         fetched_at = self._clock()
         try:
-            positions = self._client.vehicle_positions(feed)
+            positions = self._client.vehicle_positions(feed, version=feed_version(feed))
             seen = dict(self._last_seen.get(feed, {}))
             rows = new_rows(positions, seen, fetched_at)
             writer = self._writers.get(feed)
@@ -201,8 +203,15 @@ class Recorder:
             self._record_error(feed, fetched_at, exc)
             return None, 0
         log.debug("%-34s vehicles=%5d new=%5d", feed, len(positions), len(rows))
+        newest = max((p.timestamp for p in positions if p.timestamp), default=None)
+        data_age_s = (fetched_at - newest).total_seconds() if newest else None
+        stale = data_age_s is not None and data_age_s > STALE_AFTER_S
         with self._lock:
             st = self._status.setdefault(feed, FeedStatus())
+            if stale and not st.stale:
+                log.warning("%s: newest GPS report is %.0f s old; the feed looks stale", feed, data_age_s)
+            st.data_age_s = data_age_s
+            st.stale = stale
             st.last_poll_at = fetched_at
             st.vehicles = len(positions)
             st.rows_written_last_poll = len(rows)

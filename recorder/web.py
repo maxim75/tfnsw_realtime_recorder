@@ -14,7 +14,7 @@ from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from tfnsw_trip_planner import TripPlannerClient
 
 from .config import EnvConfig, SettingsStore
-from .feeds import DAILY_REQUEST_QUOTA, KNOWN_FEEDS
+from .feeds import DAILY_REQUEST_QUOTA, KNOWN_FEEDS, feed_version
 from .recorder import FeedStatus, Recorder
 from .uploader import Uploader, make_s3_client
 from .writer import recover_open_files
@@ -102,7 +102,12 @@ def create_app(env: EnvConfig | None = None, components: Components | None = Non
         feeds = []
         for feed in KNOWN_FEEDS:
             st = feed_status.get(feed)
-            feeds.append({"feed": feed, "enabled": feed in settings.feeds, **asdict(st or FeedStatus())})
+            feeds.append({
+                "feed": feed,
+                "enabled": feed in settings.feeds,
+                "version": feed_version(feed),
+                **asdict(st or FeedStatus()),
+            })
         return {
             "recorder": {"alive": comps.recorder.alive, "started_at": comps.recorder.started_at},
             "settings": settings.to_dict(),

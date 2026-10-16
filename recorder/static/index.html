@@ -20,6 +20,7 @@
   .wrap { overflow-x:auto; }
   input[type=number] { width:80px; }
   button { padding:6px 14px; }
+  .tag { font-size: 11px; color: var(--muted); border: 1px solid var(--line); border-radius: 4px; padding: 0 4px; }
   .err { color:var(--bad); max-width:320px; overflow-wrap:anywhere; }
 </style>
 </head>
@@ -70,6 +71,14 @@ const fmtTime = (iso) => iso
   ? new Date(iso).toLocaleString("en-AU", { timeZone: "Australia/Sydney", hour12: false })
   : "—";
 const esc = (s) => String(s ?? "").replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]);
+// location.origin never carries user:pass@, which fetch() rejects in relative URLs.
+const api = (path) => new URL(path, location.origin);
+const fmtAge = (sec) => {
+  if (sec == null) return "—";
+  const units = [[86400 * 365, "y"], [86400, "d"], [3600, "h"], [60, "m"]];
+  for (const [n, u] of units) if (sec >= n) return `${Math.floor(sec / n)}${u}`;
+  return `${Math.round(sec)}s`;
+};
 
 function quotaText(feeds, interval) {
   const perDay = Math.round(feeds * 86400 / interval);
@@ -99,9 +108,11 @@ function render(s) {
   $("feeds").innerHTML = s.feeds.map((f) => `
     <tr>
       <td><input type="checkbox" value="${esc(f.feed)}" ${checked.has(f.feed) ? "checked" : ""}></td>
-      <td>${esc(f.feed)}</td>
+      <td>${esc(f.feed)} <span class="tag">${esc(f.version)}</span></td>
       <td>${fmtTime(f.last_poll_at)}</td>
-      <td class="num">${f.vehicles ?? "—"}</td>
+      <td class="num">${f.vehicles ?? "—"}${f.stale
+        ? `<br><span class="bad" title="Newest GPS report is ${fmtAge(f.data_age_s)} old">stale · ${fmtAge(f.data_age_s)}</span>`
+        : ""}</td>
       <td class="num">${f.rows_in_window ?? "—"}</td>
       <td class="muted">${esc(f.current_file ?? "—")}</td>
       <td class="err">${f.last_error ? `${esc(f.last_error)}<br><span class="muted">${fmtTime(f.last_error_at)}</span>` : ""}</td>
@@ -119,7 +130,7 @@ function render(s) {
 
 async function refresh() {
   try {
-    const r = await fetch("/api/status");
+    const r = await fetch(api("/api/status"));
     if (r.ok) render(await r.json());
   } catch (e) { $("msg").textContent = "Status unavailable"; }
 }
@@ -127,7 +138,7 @@ async function refresh() {
 $("interval").addEventListener("input", markDirty);
 $("save").addEventListener("click", async () => {
   const feeds = [...document.querySelectorAll("#feeds input:checked")].map((i) => i.value);
-  const r = await fetch("/api/settings", {
+  const r = await fetch(api("/api/settings"), {
     method: "PUT",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ feeds, interval: Number($("interval").value) }),

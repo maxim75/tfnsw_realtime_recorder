@@ -89,6 +89,13 @@ def test_status(ctx):
     assert "secret" not in str(body) and "admin_password" not in str(body)
 
 
+def test_status_includes_api_version_per_feed(ctx):
+    client, _ = ctx
+    feeds = {f["feed"]: f for f in client.get("/api/status", auth=AUTH).json()["feeds"]}
+    assert feeds["metro"]["version"] == "v2" and feeds["buses"]["version"] == "v1"
+    assert "stale" in feeds["buses"] and "data_age_s" in feeds["buses"]
+
+
 def test_update_settings(ctx):
     client, comps = ctx
     r = client.put("/api/settings", json={"feeds": ["metro"], "interval": 60}, auth=AUTH)
