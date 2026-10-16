@@ -188,8 +188,25 @@ midnight Sydney time:
 ```bash
 python -m recorder.playback --date yesterday
 ```
-- Bus `vehicle_id`s include the trip, so a bus starting a new trip appears as a
-  new vehicle.
+
+Bus `vehicle_id`s include the trip, so a bus starting a new trip appears as a
+new vehicle.
+
+## Static playback site (GitHub Pages)
+
+The public site [tfnsw-playback-map](https://github.com/maxim75/tfnsw-playback-map)
+replays one day from static files. Create them with `export_static.py`, which
+reads the day from S3 (or from a built `data/playback/<date>.sqlite`) and writes
+`index.json` plus one compact gzip file per 10-minute window:
+
+```bash
+uv run export_static.py --date 2026-10-17 --out ../tfnsw-playback-map/data
+```
+
+`--date` takes `YYYY-MM-DD`, `today` or `yesterday` (default). Only finished
+windows are written (15 minutes after each ends), and the output directory's
+previous day is replaced. Then commit and push `data/` in the site repository;
+its README has the full steps.
 
 ## Map in kepler.gl
 
