@@ -102,6 +102,30 @@ SELECT * FROM read_csv('s3://<bucket>/vehiclepos/feed=buses/date=2026-10-16/*.cs
                        hive_partitioning = true);
 ```
 
+## Live map
+
+`/map` (same login as the status page) shows every vehicle the recorder is
+polling on a zoomable Sydney map, moving smoothly. It uses
+[MapLibre GL JS](https://maplibre.org) with [OpenFreeMap](https://openfreemap.org)
+vector tiles (no API key) and [deck.gl](https://deck.gl) WebGL layers for the
+vehicles.
+
+- **Data:** the recorder passes every poll to an in-memory live view. The page
+  loads the recent reports from `/api/live`, then receives new ones over
+  Server-Sent Events from `/api/live/stream`. This adds no TfNSW requests.
+- **Smooth motion:** vehicles are drawn about 60 s in the past (the **Delay**
+  option), between two reports the page already has, and interpolated every
+  frame. Positions update every poll (30 s by default), and TfNSW data is
+  10–15 s old when polled, so the map shows Sydney as it was about a minute
+  ago. Movement between reports is a straight line, not along the road.
+- **Options:** filter by mode (buses, trains, metro, TrainLink, ferries, light
+  rail, regional buses) and by route (`333, 380`), colour by route, speed or
+  mode, show fading trails. Zoomed in, vehicles become arrows pointing in their
+  direction of travel, with route numbers. Hover for vehicle, speed and report
+  time.
+- A vehicle disappears 2.5 minutes after its last report (end of trip, out of
+  service). Only enabled feeds appear on the map.
+
 ## Map in kepler.gl
 
 `export_csv.py` downloads the recorded files for a date and time range from
@@ -162,10 +186,10 @@ range.
    inside the container with curl/wget, which the slim image does not have.
    The image's Docker `HEALTHCHECK` (Python, hits `/healthz` every 30 s)
    reports container health instead.
-6. Docker's default stop timeout is 10 s, but shutdown can take up to ~25 s
-   (recorder stop up to 10 s, then the upload drain up to 15 s). Set the
-   container stop timeout to 30 s if Coolify offers it (e.g. via custom Docker
-   run options: `--stop-timeout 30`). Otherwise the last partial window is
+6. Docker's default stop timeout is 10 s, but shutdown can take up to ~28 s
+   (open `/map` streams are cut after 3 s, then recorder stop up to 10 s, then
+   the upload drain up to 15 s). Set the container stop timeout to 35 s if
+   Coolify offers it (e.g. via custom Docker run options: `--stop-timeout 35`). Otherwise the last partial window is
    uploaded after the next start, so nothing is lost.
 7. Run **one** instance only; two would record every feed twice.
 8. Use a long, random `ADMIN_PASSWORD` and expose the page only over the

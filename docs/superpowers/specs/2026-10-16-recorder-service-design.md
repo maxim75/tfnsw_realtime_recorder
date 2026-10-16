@@ -206,9 +206,11 @@ uvicorn handles `SIGTERM` and runs the lifespan shutdown:
    connect 5 s, read 30 s). Whatever remains in
    `complete/` is uploaded after the next start.
 
-Worst case is about 25 s (recorder stop 10 s + uploader drain 15 s). Docker's
-default stop timeout is 10 s; the README tells the user to set the stop timeout
-to 30 s. If killed early, files remain on the
+Before the lifespan shutdown, uvicorn waits for open connections; its graceful
+timeout is 3 s so open `/map` event streams (which never end on their own) are
+cut quickly — browsers reconnect by themselves. Worst case is about 28 s
+(3 s + recorder stop 10 s + uploader drain 15 s). Docker's default stop timeout
+is 10 s; the README tells the user to set the stop timeout to 35 s. If killed early, files remain on the
 volume and nothing is lost.
 
 ## Docker and Coolify

@@ -84,6 +84,7 @@ class Recorder:
         request_spacing: float = 1 / MAX_REQUESTS_PER_SECOND,
         clock: Callable[[], datetime] = lambda: datetime.now(tz=SYDNEY_TZ),
         on_fatal: Callable[[], None] = terminate_process,
+        on_positions: Callable[[str, datetime, list], None] | None = None,
     ) -> None:
         self._client = client
         self._settings = settings
@@ -92,6 +93,7 @@ class Recorder:
         self._spacing = request_spacing
         self._clock = clock
         self._on_fatal = on_fatal
+        self._on_positions = on_positions  # live map; must never affect recording
         self._writers: dict[str, RotatingWriter] = {}
         self._last_seen: dict[str, dict] = {}
         self._status: dict[str, FeedStatus] = {}
@@ -217,6 +219,11 @@ class Recorder:
             st.rows_written_last_poll = len(rows)
             st.total_rows += len(rows)
         self._sync_writer_status(feed)
+        if self._on_positions is not None:
+            try:
+                self._on_positions(feed, fetched_at, positions)
+            except Exception:
+                log.exception("%s: live view update failed", feed)
         return len(positions), len(rows)
 
     def _close_disabled(self, settings: Settings) -> None:

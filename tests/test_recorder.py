@@ -267,3 +267,31 @@ def test_empty_feed_has_no_data_age(tmp_path):
     rec.poll_once(store.get())
     st = rec.status()["buses"]
     assert st.data_age_s is None and st.stale is False
+
+
+def test_positions_are_passed_to_live_view_after_each_poll(tmp_path):
+    seen = []
+    store = SettingsStore(tmp_path / "settings.json")
+    store.update({"feeds": ["buses", "metro"], "interval": 30})
+    rec = Recorder(
+        FakeClient({"buses": [vp("a")], "metro": APIError("API error 500")}), store, tmp_path,
+        lambda p: None, request_spacing=0, clock=lambda: utc(2026, 10, 16, 1, 11),
+        on_positions=lambda feed, fetched_at, positions: seen.append((feed, fetched_at, len(positions))),
+    )
+    rec.poll_once(store.get())
+    assert seen == [("buses", utc(2026, 10, 16, 1, 11), 1)]  # not called for the failed feed
+
+
+def test_live_view_errors_do_not_affect_recording(tmp_path):
+    def broken(*_):
+        raise RuntimeError("live view bug")
+
+    store = SettingsStore(tmp_path / "settings.json")
+    store.update({"feeds": ["buses"], "interval": 30})
+    rec = Recorder(
+        FakeClient({"buses": [vp("a")]}), store, tmp_path, lambda p: None,
+        request_spacing=0, clock=lambda: utc(2026, 10, 16, 1, 11), on_positions=broken,
+    )
+    rec.poll_once(store.get())
+    st = rec.status()["buses"]
+    assert st.rows_written_last_poll == 1 and st.last_error is None

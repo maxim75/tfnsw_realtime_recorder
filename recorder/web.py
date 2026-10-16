@@ -1,20 +1,23 @@
-"""FastAPI app: control page, status API, settings API, health check."""
+"""FastAPI app: control page, live map, status/settings/live APIs, health check."""
 from __future__ import annotations
 
+import asyncio
+import json
 import logging
 import secrets
 from contextlib import asynccontextmanager
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 
-from fastapi import Body, Depends, FastAPI, HTTPException
-from fastapi.responses import FileResponse, PlainTextResponse
+from fastapi import Body, Depends, FastAPI, Header, HTTPException, Request
+from fastapi.responses import FileResponse, PlainTextResponse, StreamingResponse
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from tfnsw_trip_planner import TripPlannerClient
 
 from .config import EnvConfig, SettingsStore
 from .feeds import DAILY_REQUEST_QUOTA, KNOWN_FEEDS, feed_version
+from .live import LiveHub
 from .recorder import FeedStatus, Recorder
 from .uploader import Uploader, make_s3_client
 from .writer import recover_open_files
@@ -23,6 +26,9 @@ log = logging.getLogger(__name__)
 
 STATIC_DIR = Path(__file__).parent / "static"
 
+SSE_POLL_S = 1.0  # how often an open stream checks the hub for new batches
+SSE_HEARTBEAT_S = 15.0  # keeps proxies (Coolify's Traefik) from closing idle streams
+
 
 @dataclass
 class Components:
@@ -30,6 +36,7 @@ class Components:
     settings: SettingsStore
     recorder: Any
     uploader: Any
+    live: LiveHub = field(default_factory=LiveHub)
 
 
 def build_components(env: EnvConfig) -> Components:
@@ -46,10 +53,12 @@ def build_components(env: EnvConfig) -> Components:
         env.data_dir,
     )
     # 8 s timeout (not the library's 30 s) so an in-flight request finishes within the recorder's 10 s shutdown join.
+    live = LiveHub()
     recorder = Recorder(
-        TripPlannerClient(api_key=env.tfnsw_api_key, timeout=8), settings, env.data_dir, uploader.enqueue
+        TripPlannerClient(api_key=env.tfnsw_api_key, timeout=8), settings, env.data_dir, uploader.enqueue,
+        on_positions=live.publish,
     )
-    return Components(env=env, settings=settings, recorder=recorder, uploader=uploader)
+    return Components(env=env, settings=settings, recorder=recorder, uploader=uploader, live=live)
 
 
 def create_app(env: EnvConfig | None = None, components: Components | None = None) -> FastAPI:
@@ -65,6 +74,7 @@ def create_app(env: EnvConfig | None = None, components: Components | None = Non
             comps.recorder.start()
             yield
         finally:
+            comps.live.close()
             log.info("Shutting down: closing open files and uploading")
             try:
                 comps.recorder.stop(timeout=10)
@@ -94,6 +104,47 @@ def create_app(env: EnvConfig | None = None, components: Components | None = Non
     @app.get("/", dependencies=[Depends(require_auth)])
     def index() -> FileResponse:
         return FileResponse(STATIC_DIR / "index.html")
+
+    @app.get("/map", dependencies=[Depends(require_auth)])
+    def live_map() -> FileResponse:
+        return FileResponse(STATIC_DIR / "map.html")
+
+    @app.get("/api/live", dependencies=[Depends(require_auth)])
+    def live_snapshot() -> dict:
+        return comps.live.snapshot()
+
+    @app.get("/api/live/stream", dependencies=[Depends(require_auth)])
+    async def live_stream(
+        request: Request, since: int | None = None, last_event_id: str | None = Header(None)
+    ) -> StreamingResponse:
+        """Server-Sent Events: one event per batch of new reports, id = batch seq."""
+        if last_event_id and last_event_id.isdigit():
+            since = int(last_event_id)  # an EventSource reconnect resumes where it stopped
+        hub = comps.live
+
+        async def events():
+            seq = hub.seq if since is None else since
+            if seq > hub.seq:
+                seq = 0  # id from before a server restart: resend the whole buffer
+            idle = 0.0
+            yield "retry: 5000\n\n"
+            while True:
+                for batch in hub.batches_after(seq):
+                    seq = batch["seq"]
+                    idle = 0.0
+                    yield f"id: {seq}\ndata: {json.dumps(batch, separators=(',', ':'))}\n\n"
+                if hub.closed or await request.is_disconnected():
+                    return
+                await asyncio.sleep(SSE_POLL_S)
+                idle += SSE_POLL_S
+                if idle >= SSE_HEARTBEAT_S:
+                    idle = 0.0
+                    yield ": ping\n\n"
+
+        return StreamingResponse(
+            events(), media_type="text/event-stream",
+            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+        )
 
     @app.get("/api/status", dependencies=[Depends(require_auth)])
     def status() -> dict:

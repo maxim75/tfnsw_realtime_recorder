@@ -160,3 +160,63 @@ def test_uploader_stopped_even_if_recorder_stop_raises(tmp_path):
         with TestClient(create_app(env, comps)):
             pass
     assert uploader.stop_calls == [15]
+
+
+def _publish(comps, vehicle="a"):
+    from datetime import datetime, timezone
+
+    from tfnsw_trip_planner import VehiclePosition
+
+    now = datetime.now(tz=timezone.utc)
+    comps.live.publish("buses", now, [VehiclePosition(
+        vehicle_id=vehicle, trip_id="t", route_id="2510_333", latitude=-33.8, longitude=151.2,
+        bearing=90.0, speed=5.0, timestamp=now,
+    )])
+
+
+def test_map_page(ctx):
+    client, _ = ctx
+    r = client.get("/map", auth=AUTH)
+    assert r.status_code == 200
+    assert "maplibre-gl@4.7.1" in r.text and "deck.gl@9.1.14" in r.text
+
+
+def test_live_snapshot(ctx):
+    client, comps = ctx
+    _publish(comps)
+    body = client.get("/api/live", auth=AUTH).json()
+    assert body["seq"] == 1
+    assert body["feeds"]["buses"][0][:2] == ["a", "2510_333"]
+
+
+def test_live_stream_sends_batches_after_since(ctx):
+    client, comps = ctx
+    _publish(comps, "a")
+    _publish(comps, "b")
+    comps.live.close()  # ends the stream after the backlog, like shutdown
+    with client.stream("GET", "/api/live/stream?since=1", auth=AUTH) as r:
+        assert r.headers["content-type"].startswith("text/event-stream")
+        text = "".join(r.iter_text())
+    assert "id: 2\n" in text and '"feed":"buses"' in text and '"b"' in text
+    assert "id: 1\n" not in text
+
+
+def test_live_stream_resumes_from_last_event_id(ctx):
+    client, comps = ctx
+    _publish(comps, "a")
+    _publish(comps, "b")
+    comps.live.close()
+    with client.stream("GET", "/api/live/stream", auth=AUTH, headers={"Last-Event-ID": "1"}) as r:
+        text = "".join(r.iter_text())
+    assert "id: 2\n" in text and "id: 1\n" not in text
+
+
+def test_live_stream_after_server_restart_resends_buffer(ctx):
+    # The browser reconnects with the Last-Event-ID of the previous server process,
+    # which is higher than anything this process has sent.
+    client, comps = ctx
+    _publish(comps, "a")
+    comps.live.close()
+    with client.stream("GET", "/api/live/stream", auth=AUTH, headers={"Last-Event-ID": "5000"}) as r:
+        text = "".join(r.iter_text())
+    assert "id: 1\n" in text and '"a"' in text
