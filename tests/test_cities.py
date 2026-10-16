@@ -4,6 +4,8 @@ import pytest
 
 from recorder.cities import City, Feed, load_cities
 
+from repo_env import REPO_ENV
+
 # Sydney's feeds and defaults before multi-city (every gtfs/vehiclepos feed that answered
 # on 2026-10-16); cities.toml must keep them.
 KNOWN_FEEDS = (
@@ -59,9 +61,12 @@ def _minimal(id="x", tz="Europe/Prague", default='["a"]', feed="a", extra=""):
     return MINIMAL.format(id=id, tz=tz, default=default, feed=feed, extra=extra)
 
 
-def test_loads_the_cities_from_repo_file():
-    cities = load_cities(env=KEY_ENV)
-    assert list(cities) == ["sydney", "prague", "kyiv"]
+REPO_CITIES = load_cities(env=REPO_ENV)
+
+
+def test_repo_file_keeps_sydney_first_and_prague():
+    cities = REPO_CITIES
+    assert list(cities)[0] == "sydney"  # the default city (first in the picker)
     sydney, prague = cities["sydney"], cities["prague"]
     assert sydney.timezone.key == "Australia/Sydney"
     assert prague.timezone.key == "Europe/Prague"
@@ -78,12 +83,39 @@ def test_loads_the_cities_from_repo_file():
     assert prague.feed("all").mode == "bus"
     assert prague.headers == {}
     assert prague.disabled_reason is None
-    kyiv = cities["kyiv"]
+
+
+def test_repo_file_kyiv():
+    kyiv = REPO_CITIES["kyiv"]
     assert kyiv.timezone.key == "Europe/Kyiv"
     assert kyiv.s3_prefix == "vehiclepos/city=kyiv"
     assert kyiv.static_gtfs.startswith("https://data.kyivcity.gov.ua/")
     assert kyiv.feed("all").url.startswith("https://data.kyivcity.gov.ua/")
     assert kyiv.default_feeds == ("all",) and kyiv.headers == {} and kyiv.disabled_reason is None
+
+
+# -- checks every city in the repo file, so a newly added city is covered too ------
+
+def test_repo_cities_have_distinct_s3_prefixes():
+    prefixes = [c.s3_prefix for c in REPO_CITIES.values()]
+    assert len(set(prefixes)) == len(prefixes)
+
+
+@pytest.mark.parametrize("city", list(REPO_CITIES.values()), ids=list(REPO_CITIES))
+def test_repo_city_is_well_formed(city):
+    if city.id != "sydney":  # Sydney keeps the pre-multi-city prefix
+        assert city.s3_prefix == f"vehiclepos/city={city.id}"
+    assert city.name and city.attribution
+    lon, lat = city.center
+    assert -180 <= lon <= 180 and -90 <= lat <= 90
+    assert 3 <= city.zoom <= 16
+    assert city.interval >= 10 and city.max_requests_per_second > 0
+    assert city.feeds and city.default_feeds
+    for feed in city.feeds:
+        assert feed.url.startswith(("https://", "http://")) and feed.mode
+    if city.static_gtfs:
+        assert city.static_gtfs.startswith(("https://", "http://"))
+    assert city.disabled_reason is None
 
 
 def test_sydney_feed_urls_and_modes_match_the_legacy_feed_list():
