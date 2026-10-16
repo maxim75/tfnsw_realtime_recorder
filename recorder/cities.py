@@ -85,6 +85,14 @@ def _parse_city(cid: str, section: dict, env: Mapping[str, str]) -> City:
         s3_prefix = section["s3_prefix"]
         if cid == "sydney" and env.get("S3_PREFIX"):
             s3_prefix = env["S3_PREFIX"]
+        pattern = section.get("route_label", {}).get("pattern")
+        if pattern is not None:
+            try:
+                compiled = re.compile(pattern)
+            except re.error as exc:
+                raise ValueError(f"bad route_label pattern {pattern!r}: {exc}") from exc
+            if "label" not in compiled.groupindex:
+                raise ValueError(f"route_label pattern {pattern!r} needs a named group 'label'")
         lon, lat = section["center"]
         return City(
             id=cid,
@@ -100,7 +108,7 @@ def _parse_city(cid: str, section: dict, env: Mapping[str, str]) -> City:
             default_feeds=default_feeds,
             feeds=feeds,
             headers=headers,
-            route_label_pattern=section.get("route_label", {}).get("pattern"),
+            route_label_pattern=pattern,
             static_gtfs=section.get("static_gtfs"),
             disabled_reason=disabled_reason,
             _by_id=by_id,

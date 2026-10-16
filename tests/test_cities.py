@@ -139,3 +139,10 @@ def test_cities_file_env_selects_file(tmp_path):
 def test_rejects_bad_config(tmp_path, text, message):
     with pytest.raises(ValueError, match=message):
         load_cities(_write(tmp_path, text), env={})
+
+
+@pytest.mark.parametrize("pattern", ["(unclosed", "_(?P<name>[^_]+)$", "_([^_]+)$"])
+def test_route_label_pattern_must_compile_with_a_label_group(tmp_path, pattern):
+    path = _write(tmp_path, _minimal(extra=f"[x.route_label]\npattern = '{pattern}'\n"))
+    with pytest.raises(ValueError, match="city 'x'"):
+        load_cities(path, env={})
