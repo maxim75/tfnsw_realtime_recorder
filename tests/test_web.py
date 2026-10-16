@@ -349,17 +349,18 @@ def build(tmp_path, cities, s3=None, session=None):
     )
 
 
-def test_build_components_records_both_cities_with_own_clients(tmp_path):
+def test_build_components_records_every_city_with_own_clients(tmp_path):
     comps = build(tmp_path, CITIES)
-    assert list(comps.cities) == ["sydney", "prague"]
+    assert list(comps.cities) == ["sydney", "prague", "kyiv"]
     recorders = [cc.recorder for cc in comps.cities.values()]
     assert all(isinstance(r, Recorder) for r in recorders)
-    assert [r.city.id for r in recorders] == ["sydney", "prague"]
-    assert len(FakeGtfsRtClient.instances) == 2
+    assert [r.city.id for r in recorders] == ["sydney", "prague", "kyiv"]
+    assert len(FakeGtfsRtClient.instances) == 3
     assert recorders[0]._client is not recorders[1]._client  # one session per thread
     assert recorders[1]._data_dir == tmp_path / "prague"
-    assert [r._settings.get() for r in recorders] == [comps.settings.get("sydney"), comps.settings.get("prague")]
-    assert comps.uploader.status()["prefixes"] == {"sydney": "vehiclepos", "prague": "vehiclepos/city=prague"}
+    assert [r._settings.get() for r in recorders] == [comps.settings.get(c) for c in comps.cities]
+    assert comps.uploader.status()["prefixes"] == {
+        "sydney": "vehiclepos", "prague": "vehiclepos/city=prague", "kyiv": "vehiclepos/city=kyiv"}
     assert comps.cities["prague"].history.tz.key == "Europe/Prague"
 
 
@@ -409,11 +410,11 @@ def test_build_components_labels_prague_lines_from_cached_routes(tmp_path):
         bearing=None, speed=None, timestamp=now,
     )])
     assert comps.cities["prague"].live.snapshot()["feeds"]["all"][0][7:] == ["B", "metro"]
-    assert [r._city_id for r in comps.refreshers] == ["prague"]  # Sydney has no static GTFS
+    assert [r._city_id for r in comps.refreshers] == ["prague", "kyiv"]  # Sydney has no static GTFS
     with TestClient(create_app(comps.env, comps)):
         assert comps.refreshers[0].alive
     assert not comps.refreshers[0].alive
-    assert session.calls == []  # cache is fresh: no download
+    assert CITIES["prague"].static_gtfs not in session.calls  # cache is fresh: no download
 
 
 # -- multi-city API ---------------------------------------------------------------
@@ -429,8 +430,8 @@ def _publish_prague(comps, vehicle="p"):
 def test_cities_lists_config_in_order(ctx):
     client, _ = ctx
     body = client.get("/api/cities", auth=AUTH).json()
-    assert [c["id"] for c in body] == ["sydney", "prague"]
-    syd, prague = body
+    assert [c["id"] for c in body] == ["sydney", "prague", "kyiv"]
+    syd, prague, _ = body
     assert syd["name"] == "Sydney" and syd["timezone"] == "Australia/Sydney"
     assert len(syd["center"]) == 2
     assert syd["zoom"] > 0 and syd["attribution"]

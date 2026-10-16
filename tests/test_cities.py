@@ -59,9 +59,9 @@ def _minimal(id="x", tz="Europe/Prague", default='["a"]', feed="a", extra=""):
     return MINIMAL.format(id=id, tz=tz, default=default, feed=feed, extra=extra)
 
 
-def test_loads_sydney_and_prague_from_repo_file():
+def test_loads_the_cities_from_repo_file():
     cities = load_cities(env=KEY_ENV)
-    assert list(cities) == ["sydney", "prague"]
+    assert list(cities) == ["sydney", "prague", "kyiv"]
     sydney, prague = cities["sydney"], cities["prague"]
     assert sydney.timezone.key == "Australia/Sydney"
     assert prague.timezone.key == "Europe/Prague"
@@ -78,6 +78,12 @@ def test_loads_sydney_and_prague_from_repo_file():
     assert prague.feed("all").mode == "bus"
     assert prague.headers == {}
     assert prague.disabled_reason is None
+    kyiv = cities["kyiv"]
+    assert kyiv.timezone.key == "Europe/Kyiv"
+    assert kyiv.s3_prefix == "vehiclepos/city=kyiv"
+    assert kyiv.static_gtfs.startswith("https://data.kyivcity.gov.ua/")
+    assert kyiv.feed("all").url.startswith("https://data.kyivcity.gov.ua/")
+    assert kyiv.default_feeds == ("all",) and kyiv.headers == {} and kyiv.disabled_reason is None
 
 
 def test_sydney_feed_urls_and_modes_match_the_legacy_feed_list():
