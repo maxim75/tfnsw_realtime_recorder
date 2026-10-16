@@ -25,6 +25,7 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta
 from datetime import time as dt_time
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 from .export import window_of
 from .feeds import KNOWN_FEEDS, STALE_AFTER_S, feed_dir_name
@@ -86,12 +87,14 @@ class History:
         data_dir: Path,
         *,
         clock: Callable[[], float] = time.time,
+        tz: ZoneInfo = SYDNEY_TZ,
     ) -> None:
         self._client = client
         self._bucket = bucket
         self._prefix = prefix
         self._data_dir = data_dir
         self._clock = clock
+        self.tz = tz
         self._lock = threading.Lock()
         self._windows: OrderedDict[int, tuple[float | None, bytes]] = OrderedDict()  # start -> (expires, body)
         self._listings: dict[tuple[str, str], tuple[float | None, list[str]]] = {}
@@ -107,7 +110,7 @@ class History:
                 return cached[1]
         final = now >= start + WINDOW_S + FINAL_AFTER_S
         # A day built with build_playback.py is served from that local file.
-        body = read_window(self._data_dir, start)
+        body = read_window(self._data_dir, start, self.tz)
         if body is None:
             body = encode_window(start, self.collect(start))
         with self._lock:
@@ -119,7 +122,7 @@ class History:
 
     def collect(self, start: int) -> dict[str, list[list]]:
         """Reports per feed in the window starting at *start*, from S3 and local recordings."""
-        window = datetime.fromtimestamp(start, tz=SYDNEY_TZ)
+        window = datetime.fromtimestamp(start, tz=self.tz)
         with ThreadPoolExecutor(max_workers=S3_WORKERS) as pool:
             results = pool.map(lambda feed: (feed, self._feed_reports(feed, window)), KNOWN_FEEDS)
             feeds = {feed: reports for feed, reports in results if reports}
@@ -162,7 +165,7 @@ class History:
                 if not resp.get("IsTruncated"):
                     break
                 kwargs["ContinuationToken"] = resp["NextContinuationToken"]
-            day_end = datetime.combine(window.date() + timedelta(days=1), dt_time(), tzinfo=SYDNEY_TZ).timestamp()
+            day_end = datetime.combine(window.date() + timedelta(days=1), dt_time(), tzinfo=self.tz).timestamp()
             cached = (None if now >= day_end + FINAL_AFTER_S else now + LIVE_TTL_S, keys)  # None = never expires
             with self._lock:
                 self._listings[(feed, day)] = cached

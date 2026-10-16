@@ -92,7 +92,7 @@ def export_day(history, day: date, out: Path, *, now: float | None = None) -> di
     wdir.mkdir(parents=True, exist_ok=True)
     for old in wdir.glob("*.json.gz"):
         old.unlink()
-    starts = day_windows(day)
+    starts = day_windows(day, history.tz)
     windows, feeds_seen, total = {}, set(), 0
     for start in starts:
         if now < start + WINDOW_S + FINAL_AFTER_S:
@@ -106,16 +106,16 @@ def export_day(history, day: date, out: Path, *, now: float | None = None) -> di
         windows[str(start)] = n
         feeds_seen |= set(feeds)
         total += n
-        log.info("%s: %d reports", datetime.fromtimestamp(start, tz=SYDNEY_TZ).strftime("%H:%M"), n)
+        log.info("%s: %d reports", datetime.fromtimestamp(start, tz=history.tz).strftime("%H:%M"), n)
     index = {
         "date": day.isoformat(),
-        "timezone": "Australia/Sydney",
+        "timezone": history.tz.key,
         "start": starts[0],
         "end": starts[-1] + WINDOW_S,
         "window_seconds": WINDOW_S,
         "windows": windows,
         "feeds": sorted(feeds_seen),
-        "generated": datetime.now(tz=SYDNEY_TZ).isoformat(timespec="seconds"),
+        "generated": datetime.now(tz=history.tz).isoformat(timespec="seconds"),
         "source": "Transport for NSW Open Data, GTFS-Realtime vehicle positions (CC BY 4.0)",
     }
     (out / "index.json").write_text(json.dumps(index, indent=1))
@@ -141,7 +141,7 @@ def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
     load_dotenv()
     try:
-        day = resolve_date(args.date)
+        day = resolve_date(args.date, SYDNEY_TZ)
         s3 = S3Config.from_env()
     except (ValueError, ConfigError) as exc:
         log.error("%s", exc)

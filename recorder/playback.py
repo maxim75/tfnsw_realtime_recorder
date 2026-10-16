@@ -19,6 +19,7 @@ import time
 from datetime import date, datetime, timedelta
 from datetime import time as dt_time
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 from .windows import SYDNEY_TZ, WINDOW
 
@@ -31,16 +32,16 @@ def day_file(data_dir: Path, day: date) -> Path:
     return data_dir / "playback" / f"{day.isoformat()}.sqlite"
 
 
-def day_windows(day: date) -> list[int]:
-    """Window starts (epoch) of a Sydney-local day: 144, or 138/150 on DST change days."""
-    first = datetime.combine(day, dt_time(), tzinfo=SYDNEY_TZ).timestamp()
-    end = datetime.combine(day + timedelta(days=1), dt_time(), tzinfo=SYDNEY_TZ).timestamp()
+def day_windows(day: date, tz: ZoneInfo) -> list[int]:
+    """Window starts (epoch) of a *tz*-local day: 144, or 138/150 on DST change days."""
+    first = datetime.combine(day, dt_time(), tzinfo=tz).timestamp()
+    end = datetime.combine(day + timedelta(days=1), dt_time(), tzinfo=tz).timestamp()
     return list(range(int(first), int(end), WINDOW_S))
 
 
-def read_window(data_dir: Path, start: int) -> bytes | None:
+def read_window(data_dir: Path, start: int, tz: ZoneInfo = SYDNEY_TZ) -> bytes | None:
     """The stored body for the window at *start*, or None if no built day file has it."""
-    day = datetime.fromtimestamp(start, tz=SYDNEY_TZ).date()
+    day = datetime.fromtimestamp(start, tz=tz).date()
     path = day_file(data_dir, day)
     if not path.is_file():
         return None
@@ -66,7 +67,7 @@ def build_day(history, day: date, path: Path, *, now: float | None = None) -> tu
     with sqlite3.connect(tmp) as db:
         db.execute("CREATE TABLE windows (start INTEGER PRIMARY KEY, reports INTEGER, body BLOB)")
         db.execute("CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT)")
-        for start in day_windows(day):
+        for start in day_windows(day, history.tz):
             if now < start + WINDOW_S + FINAL_AFTER_S:
                 break
             feeds = history.collect(start)
@@ -75,15 +76,15 @@ def build_day(history, day: date, path: Path, *, now: float | None = None) -> tu
                 db.execute("INSERT INTO windows VALUES (?, ?, ?)", (start, n, encode_window(start, feeds)))
                 windows += 1
                 reports += n
-            log.info("%s: %d reports", datetime.fromtimestamp(start, tz=SYDNEY_TZ).strftime("%H:%M"), n)
-        db.execute("INSERT INTO meta VALUES ('built_at', ?)", (datetime.now(tz=SYDNEY_TZ).isoformat(timespec="seconds"),))
+            log.info("%s: %d reports", datetime.fromtimestamp(start, tz=history.tz).strftime("%H:%M"), n)
+        db.execute("INSERT INTO meta VALUES ('built_at', ?)", (datetime.now(tz=history.tz).isoformat(timespec="seconds"),))
     os.replace(tmp, path)
     return windows, reports
 
 
-def resolve_date(value: str, now: float | None = None) -> date:
-    """YYYY-MM-DD, or 'today' / 'yesterday' in Sydney time (for scheduled builds)."""
-    today = datetime.fromtimestamp(time.time() if now is None else now, tz=SYDNEY_TZ).date()
+def resolve_date(value: str, tz: ZoneInfo, now: float | None = None) -> date:
+    """YYYY-MM-DD, or 'today' / 'yesterday' in *tz* (for scheduled builds)."""
+    today = datetime.fromtimestamp(time.time() if now is None else now, tz=tz).date()
     if value == "today":
         return today
     if value == "yesterday":
@@ -110,7 +111,7 @@ def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
     load_dotenv()
     try:
-        day = resolve_date(args.date)
+        day = resolve_date(args.date, SYDNEY_TZ)
         s3 = S3Config.from_env()
     except (ValueError, ConfigError) as exc:
         log.error("%s", exc)

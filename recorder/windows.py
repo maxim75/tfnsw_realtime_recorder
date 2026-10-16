@@ -1,4 +1,4 @@
-"""10-minute recording windows in Sydney local time."""
+"""10-minute recording windows in a city's local time."""
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
@@ -8,19 +8,19 @@ SYDNEY_TZ = ZoneInfo("Australia/Sydney")
 WINDOW = timedelta(minutes=10)
 
 
-def window_start(dt: datetime) -> datetime:
-    """Start of the 10-minute window containing aware datetime *dt*, in Sydney time.
+def window_start(dt: datetime, tz: ZoneInfo) -> datetime:
+    """Start of the 10-minute window containing aware datetime *dt*, in zone *tz*.
 
-    Sydney's UTC offset only changes on the hour, so flooring the local minute
-    never crosses an offset change.
+    UTC offsets change on whole hours (true for Sydney and Prague), so flooring
+    the local minute never crosses an offset change.
     """
-    local = dt.astimezone(SYDNEY_TZ)
+    local = dt.astimezone(tz)
     return local.replace(minute=local.minute - local.minute % 10, second=0, microsecond=0)
 
 
 def window_end(start: datetime) -> datetime:
-    """Start of the next window (arithmetic in UTC so DST changes are handled)."""
-    return (start.astimezone(timezone.utc) + WINDOW).astimezone(SYDNEY_TZ)
+    """Start of the next window, in *start*'s zone (arithmetic in UTC so DST changes are handled)."""
+    return (start.astimezone(timezone.utc) + WINDOW).astimezone(start.tzinfo)
 
 
 def window_label(start: datetime) -> str:

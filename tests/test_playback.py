@@ -81,6 +81,28 @@ def test_resolve_date():
     from recorder.playback import resolve_date
 
     now = datetime(2026, 10, 16, 0, 30, tzinfo=SYDNEY_TZ).timestamp()  # 13:30 UTC on the 15th
-    assert resolve_date("yesterday", now) == date(2026, 10, 15)
-    assert resolve_date("today", now) == date(2026, 10, 16)
-    assert resolve_date("2026-01-02", now) == date(2026, 1, 2)
+    assert resolve_date("yesterday", SYDNEY_TZ, now) == date(2026, 10, 15)
+    assert resolve_date("today", SYDNEY_TZ, now) == date(2026, 10, 16)
+    assert resolve_date("2026-01-02", SYDNEY_TZ, now) == date(2026, 1, 2)
+
+
+def test_day_windows_counts_by_zone_and_dst():
+    from zoneinfo import ZoneInfo
+
+    from recorder.playback import day_windows
+
+    prague = ZoneInfo("Europe/Prague")
+    assert len(day_windows(date(2026, 10, 16), prague)) == 144
+    assert len(day_windows(date(2026, 10, 25), prague)) == 150  # DST ends
+    assert len(day_windows(date(2026, 3, 29), prague)) == 138  # DST starts
+    assert len(day_windows(date(2026, 4, 5), SYDNEY_TZ)) == 150
+
+
+def test_resolve_date_uses_the_given_zone():
+    from zoneinfo import ZoneInfo
+
+    from recorder.playback import resolve_date
+
+    now = datetime(2026, 10, 16, 23, 30, tzinfo=ZoneInfo("UTC")).timestamp()  # 01:30 on the 17th in Prague
+    assert resolve_date("today", ZoneInfo("Europe/Prague"), now) == date(2026, 10, 17)
+    assert resolve_date("today", ZoneInfo("America/New_York"), now) == date(2026, 10, 16)

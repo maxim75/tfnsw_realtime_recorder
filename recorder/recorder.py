@@ -11,6 +11,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 from tfnsw_trip_planner import TripPlannerError
 
@@ -22,7 +23,7 @@ from .writer import RotatingWriter
 log = logging.getLogger(__name__)
 
 
-def new_rows(positions, last_seen: dict, fetched_at: datetime) -> list[dict[str, str]]:
+def new_rows(positions, last_seen: dict, fetched_at: datetime, tz: ZoneInfo = SYDNEY_TZ) -> list[dict[str, str]]:
     """Rows for positions whose GPS timestamp changed since the last poll."""
     rows = []
     present = set()
@@ -36,7 +37,7 @@ def new_rows(positions, last_seen: dict, fetched_at: datetime) -> list[dict[str,
         last_seen[key] = p.timestamp
         rows.append(
             {
-                "fetched_at": fetched_at.astimezone(SYDNEY_TZ).isoformat(timespec="seconds"),
+                "fetched_at": fetched_at.astimezone(tz).isoformat(timespec="seconds"),
                 "timestamp": p.timestamp.isoformat() if p.timestamp else "",
                 "vehicle_id": p.vehicle_id or "",
                 "trip_id": p.trip_id or "",
@@ -82,16 +83,18 @@ class Recorder:
         on_complete: Callable[[Path], None],
         *,
         request_spacing: float = 1 / MAX_REQUESTS_PER_SECOND,
-        clock: Callable[[], datetime] = lambda: datetime.now(tz=SYDNEY_TZ),
+        clock: Callable[[], datetime] | None = None,
         on_fatal: Callable[[], None] = terminate_process,
         on_positions: Callable[[str, datetime, list], None] | None = None,
+        tz: ZoneInfo = SYDNEY_TZ,
     ) -> None:
         self._client = client
         self._settings = settings
         self._data_dir = data_dir
         self._on_complete = on_complete
         self._spacing = request_spacing
-        self._clock = clock
+        self._tz = tz
+        self._clock = clock or (lambda: datetime.now(tz=tz))
         self._on_fatal = on_fatal
         self._on_positions = on_positions  # live map; must never affect recording
         self._writers: dict[str, RotatingWriter] = {}
@@ -190,10 +193,10 @@ class Recorder:
         try:
             positions = self._client.vehicle_positions(feed, version=feed_version(feed))
             seen = dict(self._last_seen.get(feed, {}))
-            rows = new_rows(positions, seen, fetched_at)
+            rows = new_rows(positions, seen, fetched_at, self._tz)
             writer = self._writers.get(feed)
             if writer is None:
-                writer = self._writers[feed] = RotatingWriter(feed, self._data_dir, self._on_complete)
+                writer = self._writers[feed] = RotatingWriter(feed, self._data_dir, self._on_complete, tz=self._tz)
             writer.write(fetched_at, rows)
             self._last_seen[feed] = seen  # only after a successful write
         except TripPlannerError as exc:

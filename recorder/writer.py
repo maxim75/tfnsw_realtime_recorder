@@ -7,9 +7,10 @@ import os
 from collections.abc import Callable
 from datetime import datetime
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 from .feeds import feed_dir_name
-from .windows import window_label, window_start
+from .windows import SYDNEY_TZ, window_label, window_start
 
 FIELDS = [
     "fetched_at",
@@ -33,7 +34,8 @@ class RotatingWriter:
     valid gzip stream.
     """
 
-    def __init__(self, feed: str, data_dir: Path, on_complete: Callable[[Path], None]) -> None:
+    def __init__(self, feed: str, data_dir: Path, on_complete: Callable[[Path], None], *, tz: ZoneInfo = SYDNEY_TZ
+    ) -> None:
         self.feed = feed
         self.dir_name = feed_dir_name(feed)
         self.open_dir = data_dir / "open" / self.dir_name
@@ -41,12 +43,13 @@ class RotatingWriter:
         self.open_dir.mkdir(parents=True, exist_ok=True)
         self.complete_dir.mkdir(parents=True, exist_ok=True)
         self._on_complete = on_complete
+        self._tz = tz
         self._window: datetime | None = None
         self.current_path: Path | None = None
         self.rows_in_window = 0
 
     def write(self, fetched_at: datetime, rows: list[dict[str, str]]) -> None:
-        start = window_start(fetched_at)
+        start = window_start(fetched_at, self._tz)
         if self._window is not None and start != self._window:
             self.close()
         if not rows:
@@ -74,7 +77,7 @@ class RotatingWriter:
         self.rows_in_window = len(rows)
 
     def rotate_if_ended(self, now: datetime) -> None:
-        if self._window is not None and window_start(now) != self._window:
+        if self._window is not None and window_start(now, self._tz) != self._window:
             self.close()
 
     def close(self) -> None:
