@@ -1,0 +1,148 @@
+from pathlib import Path
+
+import pytest
+
+from recorder.cities import City, Feed, load_cities
+
+# Sydney's feeds and defaults before multi-city (every gtfs/vehiclepos feed that answered
+# on 2026-10-16); cities.toml must keep them.
+KNOWN_FEEDS = (
+    "buses", "sydneytrains", "metro", "nswtrains", "ferries/sydneyferries", "ferries/MFF",
+    "lightrail/cbdandsoutheast", "lightrail/innerwest", "lightrail/newcastle", "lightrail/parramatta",
+    "regionbuses/centralwestandorana", "regionbuses/centralwestandorana2", "regionbuses/farwest",
+    "regionbuses/newcastlehunter", "regionbuses/newenglandnorthwest", "regionbuses/northcoast",
+    "regionbuses/northcoast2", "regionbuses/northcoast3", "regionbuses/riverinamurray",
+    "regionbuses/riverinamurray2", "regionbuses/southeasttablelands", "regionbuses/southeasttablelands2",
+    "regionbuses/sydneysurrounds",
+)
+DEFAULT_FEEDS = (
+    "buses", "sydneytrains", "metro", "nswtrains", "ferries/sydneyferries", "ferries/MFF",
+    "lightrail/cbdandsoutheast", "lightrail/innerwest", "lightrail/parramatta", "regionbuses/sydneysurrounds",
+)
+# Read from /v2/: sydneytrains and lightrail/innerwest 404 on v1, v1 metro is frozen.
+V2_FEEDS = {"sydneytrains", "metro", "lightrail/innerwest"}
+
+
+def feed_version(feed):
+    return "v2" if feed in V2_FEEDS else "v1"
+
+KEY_ENV = {"TFNSW_API_KEY": "secret"}
+
+
+def _write(tmp_path: Path, text: str) -> Path:
+    path = tmp_path / "cities.toml"
+    path.write_text(text)
+    return path
+
+
+MINIMAL = """
+[{id}]
+name = "X"
+timezone = "{tz}"
+center = [1.0, 2.0]
+zoom = 5
+s3_prefix = "p"
+attribution = "a"
+interval = 10
+max_requests_per_second = 1
+default_feeds = {default}
+
+  [[{id}.feeds]]
+  id = "{feed}"
+  url = "https://example.test/a"
+  mode = "bus"
+{extra}
+"""
+
+
+def _minimal(id="x", tz="Europe/Prague", default='["a"]', feed="a", extra=""):
+    return MINIMAL.format(id=id, tz=tz, default=default, feed=feed, extra=extra)
+
+
+def test_loads_sydney_and_prague_from_repo_file():
+    cities = load_cities(env=KEY_ENV)
+    assert list(cities) == ["sydney", "prague"]
+    sydney, prague = cities["sydney"], cities["prague"]
+    assert sydney.timezone.key == "Australia/Sydney"
+    assert prague.timezone.key == "Europe/Prague"
+    assert [f.id for f in sydney.feeds] == list(KNOWN_FEEDS)
+    assert sydney.default_feeds == DEFAULT_FEEDS
+    assert sydney.s3_prefix == "vehiclepos"
+    assert sydney.daily_quota == 60000 and prague.daily_quota is None
+    assert sydney.max_requests_per_second == 5 and prague.max_requests_per_second == 1
+    assert sydney.center == (151.05, -33.85)
+    assert sydney.route_label_pattern == r"_(?P<label>[^_]+)$"
+    assert prague.s3_prefix == "vehiclepos/city=prague"
+    assert prague.static_gtfs == "https://data.pid.cz/PID_GTFS.zip"
+    assert prague.default_feeds == ("all",)
+    assert prague.feed("all").mode == "bus"
+    assert prague.headers == {}
+    assert prague.disabled_reason is None
+
+
+def test_sydney_feed_urls_and_modes_match_the_legacy_feed_list():
+    sydney = load_cities(env=KEY_ENV)["sydney"]
+    for feed in sydney.feeds:
+        assert feed.url == (
+            f"https://api.transport.nsw.gov.au/{feed_version(feed.id)}/gtfs/vehiclepos/{feed.id}"
+        )
+    modes = {f.id: f.mode for f in sydney.feeds}
+    assert modes["buses"] == "bus"
+    assert modes["regionbuses/farwest"] == "bus"
+    assert modes["sydneytrains"] == modes["nswtrains"] == "rail"
+    assert modes["metro"] == "metro"
+    assert modes["ferries/MFF"] == "ferry"
+    assert modes["lightrail/innerwest"] == "tram"
+    assert isinstance(sydney.feed("buses"), Feed)
+    with pytest.raises(KeyError):
+        sydney.feed("nope")
+
+
+def test_expands_env_in_headers():
+    sydney = load_cities(env=KEY_ENV)["sydney"]
+    assert isinstance(sydney, City)
+    assert sydney.headers == {"Authorization": "apikey secret"}
+    assert sydney.disabled_reason is None
+
+
+@pytest.mark.parametrize("env", [{}, {"TFNSW_API_KEY": ""}])
+def test_missing_env_disables_city_only(env):
+    cities = load_cities(env=env)
+    assert cities["sydney"].disabled_reason == "TFNSW_API_KEY is not set"
+    assert cities["sydney"].headers == {}
+    assert cities["prague"].disabled_reason is None
+
+
+def test_s3_prefix_env_overrides_sydney_prefix():
+    cities = load_cities(env={**KEY_ENV, "S3_PREFIX": "/x/"})
+    assert cities["sydney"].s3_prefix == "x"
+    assert cities["prague"].s3_prefix == "vehiclepos/city=prague"
+
+
+def test_cities_file_env_selects_file(tmp_path):
+    path = _write(tmp_path, _minimal())
+    cities = load_cities(env={"CITIES_FILE": str(path)})
+    assert list(cities) == ["x"]
+    assert cities["x"].route_label_pattern is None and cities["x"].static_gtfs is None
+    assert cities["x"].daily_quota is None
+
+
+@pytest.mark.parametrize(
+    ("text", "message"),
+    [
+        (_minimal(default='["zzz"]'), "zzz"),
+        (_minimal(tz="Mars/Base"), "Mars/Base"),
+        (_minimal(extra='  [[x.feeds]]\n  id = "a"\n  url = "u"\n  mode = "bus"\n'), "duplicate"),
+        (_minimal(id="Bad_City"), "Bad_City"),
+    ],
+)
+def test_rejects_bad_config(tmp_path, text, message):
+    with pytest.raises(ValueError, match=message):
+        load_cities(_write(tmp_path, text), env={})
+
+
+@pytest.mark.parametrize("pattern", ["(unclosed", "_(?P<name>[^_]+)$", "_([^_]+)$"])
+def test_route_label_pattern_must_compile_with_a_label_group(tmp_path, pattern):
+    path = _write(tmp_path, _minimal(extra=f"[x.route_label]\npattern = '{pattern}'\n"))
+    with pytest.raises(ValueError, match="city 'x'"):
+        load_cities(path, env={})

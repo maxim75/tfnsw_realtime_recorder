@@ -7,7 +7,9 @@ window being written), so playback reaches right up to the present.
 Response (gzip-compressed JSON), in the live view's report format::
 
     {"start": <epoch>, "feeds": {"buses": [[vehicle_id, route_id, gps_epoch_s,
-                                             lon, lat, bearing, speed], ...], ...}}
+                                             lon, lat, bearing, speed, label, mode], ...], ...}}
+
+Labels and modes come from the city's `RouteInfo` when the window is served.
 """
 from __future__ import annotations
 
@@ -25,12 +27,13 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta
 from datetime import time as dt_time
 from pathlib import Path
-
+from .cities import City, Feed
 from .export import window_of
-from .feeds import KNOWN_FEEDS, STALE_AFTER_S, feed_dir_name
+from .feeds import STALE_AFTER_S, feed_dir_name
 from .playback import read_window
+from .routes import RouteInfo
 from .uploader import retry_denials
-from .windows import SYDNEY_TZ, WINDOW, window_label
+from .windows import WINDOW, window_label
 
 log = logging.getLogger(__name__)
 
@@ -78,6 +81,9 @@ def encode_window(start: int, feeds: dict[str, list[list]]) -> bytes:
 
 
 class History:
+    """One city's recorded windows. *data_dir* is the city's folder (``DATA_DIR/<city>``);
+    *routes* defaults to the route cache in it."""
+
     def __init__(
         self,
         client,
@@ -85,13 +91,18 @@ class History:
         prefix: str,
         data_dir: Path,
         *,
+        city: City,
+        routes: RouteInfo | None = None,
         clock: Callable[[], float] = time.time,
     ) -> None:
         self._client = client
         self._bucket = bucket
         self._prefix = prefix
         self._data_dir = data_dir
+        self._city = city
+        self._routes = routes if routes is not None else RouteInfo(city, data_dir)
         self._clock = clock
+        self.tz = city.timezone
         self._lock = threading.Lock()
         self._windows: OrderedDict[int, tuple[float | None, bytes]] = OrderedDict()  # start -> (expires, body)
         self._listings: dict[tuple[str, str], tuple[float | None, list[str]]] = {}
@@ -107,7 +118,9 @@ class History:
                 return cached[1]
         final = now >= start + WINDOW_S + FINAL_AFTER_S
         # A day built with build_playback.py is served from that local file.
-        body = read_window(self._data_dir, start)
+        body = read_window(self._data_dir, start, self.tz)
+        if body is not None:
+            body = self._add_labels(body)
         if body is None:
             body = encode_window(start, self.collect(start))
         with self._lock:
@@ -117,21 +130,39 @@ class History:
                 self._windows.popitem(last=False)
         return body
 
+    def _add_labels(self, body: bytes) -> bytes:
+        """A day file built before reports had label and mode gets them added."""
+        data = json.loads(gzip.decompress(body))
+        if all(len(r) >= 9 for reports in data["feeds"].values() for r in reports):
+            return body
+        for feed_id, reports in data["feeds"].items():
+            feed = self._feed_or_fallback(feed_id)
+            for r in reports:
+                if len(r) < 9:
+                    r[7:] = [self._routes.label(r[1] or None), self._routes.mode(feed, r[1] or None)]
+        return encode_window(data["start"], data["feeds"])
+
+    def _feed_or_fallback(self, feed_id: str) -> Feed:
+        try:
+            return self._city.feed(feed_id)
+        except KeyError:  # recorded once, since removed from cities.toml
+            return Feed(feed_id, "", "other")
+
     def collect(self, start: int) -> dict[str, list[list]]:
         """Reports per feed in the window starting at *start*, from S3 and local recordings."""
-        window = datetime.fromtimestamp(start, tz=SYDNEY_TZ)
+        window = datetime.fromtimestamp(start, tz=self.tz)
         with ThreadPoolExecutor(max_workers=S3_WORKERS) as pool:
-            results = pool.map(lambda feed: (feed, self._feed_reports(feed, window)), KNOWN_FEEDS)
+            results = pool.map(lambda feed: (feed.id, self._feed_reports(feed, window)), self._city.feeds)
             feeds = {feed: reports for feed, reports in results if reports}
         log.debug("history %s: %s", window_label(window), {f: len(r) for f, r in feeds.items()})
         return feeds
 
-    def _feed_reports(self, feed: str, window: datetime) -> list[list]:
+    def _feed_reports(self, feed: Feed, window: datetime) -> list[list]:
         """*feed*'s reports in *window* from S3 and local files, without repeats, by GPS time."""
-        feed_dir, label = feed_dir_name(feed), window_label(window)
+        feed_dir, label = feed_dir_name(feed.id), window_label(window)
         sources = [
             retry_denials(self._client.get_object, Bucket=self._bucket, Key=key)["Body"].read()
-            for key in self._keys(feed, window)
+            for key in self._keys(feed.id, window)
         ]
         for kind in ("complete", "open"):
             sources += [p.read_bytes() for p in sorted((self._data_dir / kind / feed_dir).glob(f"{feed_dir}_{label}*.csv.gz"))]
@@ -141,6 +172,8 @@ class History:
                 report = _report(row)
                 if report and (report[0], report[2]) not in seen:
                     seen.add((report[0], report[2]))
+                    route_id = report[1] or None
+                    report += [self._routes.label(route_id), self._routes.mode(feed, route_id)]
                     reports.append(report)
         return sorted(reports, key=lambda r: r[2])
 
@@ -162,7 +195,7 @@ class History:
                 if not resp.get("IsTruncated"):
                     break
                 kwargs["ContinuationToken"] = resp["NextContinuationToken"]
-            day_end = datetime.combine(window.date() + timedelta(days=1), dt_time(), tzinfo=SYDNEY_TZ).timestamp()
+            day_end = datetime.combine(window.date() + timedelta(days=1), dt_time(), tzinfo=self.tz).timestamp()
             cached = (None if now >= day_end + FINAL_AFTER_S else now + LIVE_TTL_S, keys)  # None = never expires
             with self._lock:
                 self._listings[(feed, day)] = cached

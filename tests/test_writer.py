@@ -109,3 +109,11 @@ def test_failed_first_write_leaves_no_state_and_next_write_has_header(tmp_path, 
     w.write(utc(2026, 10, 16, 1, 12), [row("b")])
     assert [r["vehicle_id"] for r in read_rows(w.current_path)] == ["b"]
     assert w.rows_in_window == 1
+
+
+def test_writer_names_files_in_the_given_zone(tmp_path):
+    from zoneinfo import ZoneInfo
+
+    w = RotatingWriter("buses", tmp_path, lambda p: None, tz=ZoneInfo("Europe/Prague"))
+    w.write(utc(2026, 10, 16, 10, 11), [row("a")])
+    assert w.current_path == tmp_path / "open/buses/buses_2026-10-16T12-10+0200.csv.gz"

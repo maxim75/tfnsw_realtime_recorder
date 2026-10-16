@@ -21,6 +21,10 @@
   input[type=number] { width:80px; }
   button { padding:6px 14px; }
   .tag { font-size: 11px; color: var(--muted); border: 1px solid var(--line); border-radius: 4px; padding: 0 4px; }
+  .cities { display:flex; flex-wrap:wrap; gap:4px; margin:0 0 12px; border-bottom:1px solid var(--line); }
+  .cities button { border:0; border-bottom:2px solid transparent; background:transparent; color:inherit; font:inherit; padding:6px 14px; cursor:pointer; }
+  .cities button.on { border-bottom-color:var(--accent); font-weight:600; }
+  .cities button.off { color:var(--muted); }
   .err { color:var(--bad); max-width:320px; overflow-wrap:anywhere; }
 </style>
 </head>
@@ -28,6 +32,7 @@
 <main>
   <header>
     <h1>Vehicle position recorder</h1>
+    <nav id="cities" class="cities" aria-label="City"></nav>
     <div class="bar">
       <span id="state" class="muted">Loading…</span>
       <span id="uptime" class="muted"></span>
@@ -59,6 +64,9 @@
 <script>
 const $ = (id) => document.getElementById(id);
 let dirty = false;
+let cities = [];
+let city = null;   // the selected city object from /api/cities
+const cityParam = () => `city=${encodeURIComponent(city.id)}`;
 
 function fmtUptime(iso) {
   if (!iso) return "";
@@ -68,7 +76,7 @@ function fmtUptime(iso) {
 }
 
 const fmtTime = (iso) => iso
-  ? new Date(iso).toLocaleString("en-AU", { timeZone: "Australia/Sydney", hour12: false })
+  ? new Date(iso).toLocaleString("en-AU", { timeZone: city ? city.timezone : undefined, hour12: false })
   : "—";
 const esc = (s) => String(s ?? "").replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]);
 // location.origin never carries user:pass@, which fetch() rejects in relative URLs.
@@ -82,21 +90,41 @@ const fmtAge = (sec) => {
 
 function quotaText(feeds, interval) {
   const perDay = Math.round(feeds * 86400 / interval);
-  return { perDay, text: `${perDay.toLocaleString()} requests/day of 60,000` };
+  return { perDay, text: `${perDay.toLocaleString()} requests/day of ${city.daily_quota.toLocaleString()}` };
 }
 
 function updateQuota() {
+  if (!city || city.daily_quota == null) { $("quota").textContent = ""; return; }  // no daily limit
   const feeds = document.querySelectorAll("#feeds input:checked").length;
   const interval = Number($("interval").value) || 1;
   const q = quotaText(feeds, interval);
   $("quota").textContent = q.text;
-  $("quota").className = q.perDay > 60000 ? "bad" : "muted";
+  $("quota").className = q.perDay > city.daily_quota ? "bad" : "muted";
 }
 
 function markDirty() { dirty = true; $("save").disabled = false; updateQuota(); }
 
+function renderCities() {
+  $("cities").innerHTML = cities.map((c) =>
+    `<button data-city="${esc(c.id)}" class="${c.id === city.id ? "on" : ""} ${c.enabled ? "" : "off"}">${esc(c.name)}</button>`).join("");
+  document.querySelectorAll("#cities button").forEach((b) => b.addEventListener("click", () => selectCity(b.dataset.city)));
+}
+
+function selectCity(id) {
+  const c = cities.find((x) => x.id === id);
+  if (!c || (city && c.id === city.id)) return;
+  city = c;
+  history.replaceState(null, "", "#" + c.id);
+  dirty = false; $("save").disabled = true; $("msg").textContent = "";
+  $("feeds").innerHTML = ""; $("state").textContent = "Loading…"; $("uptime").textContent = "";
+  renderCities(); updateQuota();
+  refresh();
+}
+
 function render(s) {
-  $("state").textContent = s.recorder.alive ? "● Recording" : "● Stopped";
+  if (s.city !== city.id) return;  // a slow response for a city that is no longer selected
+  $("state").textContent = s.recorder.alive ? "● Recording"
+    : s.recorder.disabled_reason ? `● Disabled: ${s.recorder.disabled_reason}` : "● Stopped";
   $("state").className = s.recorder.alive ? "ok" : "bad";
   $("uptime").textContent = s.recorder.started_at
     ? `${fmtUptime(s.recorder.started_at)} · since ${fmtTime(s.recorder.started_at)}` : "";
@@ -108,7 +136,7 @@ function render(s) {
   $("feeds").innerHTML = s.feeds.map((f) => `
     <tr>
       <td><input type="checkbox" value="${esc(f.feed)}" ${checked.has(f.feed) ? "checked" : ""}></td>
-      <td>${esc(f.feed)} <span class="tag">${esc(f.version)}</span></td>
+      <td>${esc(f.feed)} ${f.version ? `<span class="tag">${esc(f.version)}</span>` : ""}</td>
       <td>${fmtTime(f.last_poll_at)}</td>
       <td class="num">${f.vehicles ?? "—"}${f.stale
         ? `<br><span class="bad" title="Newest GPS report is ${fmtAge(f.data_age_s)} old">stale · ${fmtAge(f.data_age_s)}</span>`
@@ -129,16 +157,31 @@ function render(s) {
 }
 
 async function refresh() {
+  if (!city) return;
   try {
-    const r = await fetch(api("/api/status"));
+    const r = await fetch(api(`/api/status?${cityParam()}`));
     if (r.ok) render(await r.json());
   } catch (e) { $("msg").textContent = "Status unavailable"; }
+}
+
+async function init() {
+  try {
+    const r = await fetch(api("/api/cities"));
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    cities = await r.json();
+  } catch (e) { $("state").textContent = "Cities unavailable"; return; }
+  if (!cities.length) { $("state").textContent = "No cities configured"; return; }
+  const want = location.hash.slice(1);
+  city = cities.find((c) => c.id === want) || cities.find((c) => c.enabled) || cities[0];
+  renderCities(); updateQuota();
+  refresh();
+  setInterval(refresh, 5000);
 }
 
 $("interval").addEventListener("input", markDirty);
 $("save").addEventListener("click", async () => {
   const feeds = [...document.querySelectorAll("#feeds input:checked")].map((i) => i.value);
-  const r = await fetch(api("/api/settings"), {
+  const r = await fetch(api(`/api/settings?${cityParam()}`), {
     method: "PUT",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ feeds, interval: Number($("interval").value) }),
@@ -153,8 +196,7 @@ $("save").addEventListener("click", async () => {
   }
 });
 
-refresh();
-setInterval(refresh, 5000);
+init();
 </script>
 </body>
 </html>

@@ -3,11 +3,15 @@ from datetime import datetime, timezone
 
 import pytest
 import requests
-from tfnsw_trip_planner import APIError, VehiclePosition
 
+from recorder.cities import load_cities
 from recorder.config import Settings, SettingsStore
+from recorder.gtfsrt import FetchError, Position
 from recorder.recorder import Recorder, new_rows
-from recorder.windows import SYDNEY_TZ
+from recorder.routes import RouteInfo
+
+CITIES = load_cities(env={"TFNSW_API_KEY": "k"})
+SYDNEY, PRAGUE = CITIES["sydney"], CITIES["prague"]
 
 
 def utc(*args):
@@ -15,36 +19,47 @@ def utc(*args):
 
 
 def vp(vehicle="v1", ts=utc(2026, 10, 16, 1, 10), lat=-33.8, lon=151.2):
-    return VehiclePosition(
+    return Position(
         vehicle_id=vehicle, trip_id="t", route_id="2510_992", latitude=lat, longitude=lon,
-        bearing=90.0, speed=5.5, timestamp=ts.astimezone(SYDNEY_TZ),
+        bearing=90.0, speed=5.5, timestamp=ts,
     )
 
 
 class FakeClient:
-    def __init__(self, responses):
-        self.responses = responses
-        self.calls = []
-        self.versions = {}
+    """Answers ``fetch(url, headers)`` from *responses*, keyed by the city's feed ids."""
 
-    def vehicle_positions(self, mode, version=None):
-        self.calls.append(mode)
-        self.versions[mode] = version
-        r = self.responses[mode]
+    def __init__(self, responses, city=SYDNEY):
+        self.responses = {city.feed(feed).url: r for feed, r in responses.items()}
+        self.ids = {city.feed(feed).url: feed for feed in responses}
+        self.calls = []  # feed ids, in order
+        self.headers = []
+
+    def fetch(self, url, headers):
+        self.calls.append(self.ids[url])
+        self.headers.append(dict(headers))
+        r = self.responses[url]
         if isinstance(r, Exception):
             raise r
         return r
 
 
-def make(tmp_path, responses, feeds=("buses",), interval=30, now=utc(2026, 10, 16, 1, 11)):
-    store = SettingsStore(tmp_path / "settings.json")
-    store.update({"feeds": list(feeds), "interval": interval})
+def recorder(tmp_path, client, settings, on_complete=lambda p: None, city=SYDNEY, **kwargs):
+    kwargs.setdefault("request_spacing", 0)
+    return Recorder(client, city, settings, tmp_path, on_complete,
+                    routes=RouteInfo(city, tmp_path / city.id), **kwargs)
+
+
+def store_for(tmp_path, feeds, interval=30, city=SYDNEY):
+    store = SettingsStore(tmp_path / "settings.json", CITIES)
+    store.update(city.id, {"feeds": list(feeds), "interval": interval})
+    return store
+
+
+def make(tmp_path, responses, feeds=("buses",), interval=30, now=utc(2026, 10, 16, 1, 11), city=SYDNEY):
+    store = store_for(tmp_path, feeds, interval, city).for_city(city.id)
     clock = [now]
     done = []
-    rec = Recorder(
-        FakeClient(responses), store, tmp_path, done.append,
-        request_spacing=0, clock=lambda: clock[0],
-    )
+    rec = recorder(tmp_path, FakeClient(responses, city), store, done.append, city=city, clock=lambda: clock[0])
     return rec, store, clock, done
 
 
@@ -55,6 +70,7 @@ def test_new_rows_dedupes_and_skips_missing_fix():
     assert [r["vehicle_id"] for r in rows] == ["a"]
     assert rows[0]["latitude"] == "-33.800000" and rows[0]["speed"] == "5.50"
     assert rows[0]["fetched_at"] == "2026-10-16T12:11:00+11:00"
+    assert rows[0]["timestamp"] == "2026-10-16T12:10:00+11:00"  # UTC from the feed, written in local time
     assert new_rows([vp("a")], seen, fetched) == []
     assert len(new_rows([vp("a", ts=utc(2026, 10, 16, 1, 11))], seen, fetched)) == 1
 
@@ -71,12 +87,12 @@ def test_poll_once_writes_and_updates_status(tmp_path):
 def test_error_on_one_feed_does_not_stop_others(tmp_path):
     rec, store, _, _ = make(
         tmp_path,
-        {"buses": APIError("API error 429"), "metro": [vp("m")]},
+        {"buses": FetchError("HTTP 429"), "metro": [vp("m")]},
         feeds=("buses", "metro"),
     )
     rec.poll_once(store.get())
     status = rec.status()
-    assert "429" in status["buses"].last_error
+    assert status["buses"].last_error == "HTTP 429" and status["buses"].last_error_at
     assert status["metro"].rows_written_last_poll == 1
 
 
@@ -122,10 +138,7 @@ class BrokenSettings:
 
 def test_thread_fatal_error_marks_dead_and_calls_on_fatal(tmp_path):
     fatal = []
-    rec = Recorder(
-        FakeClient({}), BrokenSettings(), tmp_path, lambda p: None,
-        request_spacing=0, on_fatal=lambda: fatal.append(1),
-    )
+    rec = recorder(tmp_path, FakeClient({}), BrokenSettings(), on_fatal=lambda: fatal.append(1))
     rec.start()
     assert wait_until(lambda: fatal)
     assert not rec.alive
@@ -212,7 +225,7 @@ def test_lowering_interval_applies_within_cycle(tmp_path):
 
     store = Store()
     client = FakeClient({"buses": [vp("a")]})
-    rec = Recorder(client, store, tmp_path, lambda p: None, request_spacing=0, on_fatal=lambda: None)
+    rec = recorder(tmp_path, client, store, on_fatal=lambda: None)
     rec.start()
     assert wait_until(lambda: len(client.calls) == 1)
     store.interval = 1
@@ -225,11 +238,10 @@ def test_stop_keeps_closing_writers_when_one_close_fails(tmp_path):
         if path.name.startswith("buses_"):
             raise RuntimeError("upload queue broken")
 
-    store = SettingsStore(tmp_path / "settings.json")
-    store.update({"feeds": ["buses", "metro"], "interval": 30})
-    rec = Recorder(
-        FakeClient({"buses": [vp("a")], "metro": [vp("m")]}), store, tmp_path, on_complete,
-        request_spacing=0, clock=lambda: utc(2026, 10, 16, 1, 11),
+    store = store_for(tmp_path, ["buses", "metro"]).for_city("sydney")
+    rec = recorder(
+        tmp_path, FakeClient({"buses": [vp("a")], "metro": [vp("m")]}), store, on_complete,
+        clock=lambda: utc(2026, 10, 16, 1, 11),
     )
     rec.start()
     deadline = time.monotonic() + 5
@@ -237,17 +249,45 @@ def test_stop_keeps_closing_writers_when_one_close_fails(tmp_path):
         time.sleep(0.01)
     rec.stop(timeout=5)
     assert not rec.alive
-    completed = {p.name for p in (tmp_path / "complete").glob("*/*.csv.gz")}
+    completed = {p.name for p in (tmp_path / "sydney" / "complete").glob("*/*.csv.gz")}
     assert "metro_2026-10-16T12-10+1100.csv.gz" in completed
 
 
-def test_each_feed_is_fetched_from_its_api_version(tmp_path):
+def test_polls_each_enabled_feed_url_with_city_headers_spaced_by_rate_limit(tmp_path):
+    feeds = ("buses", "sydneytrains", "metro")
+    store = store_for(tmp_path, feeds).for_city("sydney")
+    client = FakeClient({f: [vp(f)] for f in feeds})
+    rec = Recorder(client, SYDNEY, store, tmp_path, lambda p: None,
+                   routes=RouteInfo(SYDNEY, tmp_path / "sydney"), clock=lambda: utc(2026, 10, 16, 1, 11))
+    waits = []
+    rec._stop.wait = waits.append  # record the spacing instead of sleeping
+    rec.poll_once(store.get())
+    assert client.calls == list(feeds)  # in the city's feed order
+    assert client.headers == [{"Authorization": "apikey k"}] * 3
+    assert waits == [1 / SYDNEY.max_requests_per_second] * 2  # 0.2 s between requests
+
+
+def test_recorder_accepts_the_settings_store(tmp_path):
+    store = store_for(tmp_path, ["metro"])
+    client = FakeClient({"metro": [vp("m")]})
+    rec = recorder(tmp_path, client, store, clock=lambda: utc(2026, 10, 16, 1, 11))
+    rec.poll_once(store.get("sydney"))
+    assert client.calls == ["metro"]
+
+
+def test_prague_recorder_writes_prague_local_window_files(tmp_path):
     rec, store, _, _ = make(
-        tmp_path, {"buses": [vp("a")], "metro": [vp("m")], "sydneytrains": [vp("t")]},
-        feeds=("buses", "metro", "sydneytrains"),
+        tmp_path, {"all": [vp("metro-B-25-25", lat=50.08, lon=14.44)]}, feeds=("all",),
+        now=utc(2026, 10, 16, 10, 11), city=PRAGUE,
     )
     rec.poll_once(store.get())
-    assert rec._client.versions == {"buses": "v1", "metro": "v2", "sydneytrains": "v2"}
+    path = tmp_path / "prague" / "open" / "all" / "all_2026-10-16T12-10+0200.csv.gz"
+    assert path.is_file()
+    import gzip
+
+    text = gzip.decompress(path.read_bytes()).decode()
+    assert "2026-10-16T12:11:00+02:00" in text and "metro-B-25-25" in text
+    assert rec.status()["all"].current_file == path.name
 
 
 def test_feed_with_old_gps_data_is_flagged_stale(tmp_path):
@@ -271,11 +311,10 @@ def test_empty_feed_has_no_data_age(tmp_path):
 
 def test_positions_are_passed_to_live_view_after_each_poll(tmp_path):
     seen = []
-    store = SettingsStore(tmp_path / "settings.json")
-    store.update({"feeds": ["buses", "metro"], "interval": 30})
-    rec = Recorder(
-        FakeClient({"buses": [vp("a")], "metro": APIError("API error 500")}), store, tmp_path,
-        lambda p: None, request_spacing=0, clock=lambda: utc(2026, 10, 16, 1, 11),
+    store = store_for(tmp_path, ["buses", "metro"]).for_city("sydney")
+    rec = recorder(
+        tmp_path, FakeClient({"buses": [vp("a")], "metro": FetchError("HTTP 500")}), store,
+        clock=lambda: utc(2026, 10, 16, 1, 11),
         on_positions=lambda feed, fetched_at, positions: seen.append((feed, fetched_at, len(positions))),
     )
     rec.poll_once(store.get())
@@ -286,11 +325,10 @@ def test_live_view_errors_do_not_affect_recording(tmp_path):
     def broken(*_):
         raise RuntimeError("live view bug")
 
-    store = SettingsStore(tmp_path / "settings.json")
-    store.update({"feeds": ["buses"], "interval": 30})
-    rec = Recorder(
-        FakeClient({"buses": [vp("a")]}), store, tmp_path, lambda p: None,
-        request_spacing=0, clock=lambda: utc(2026, 10, 16, 1, 11), on_positions=broken,
+    store = store_for(tmp_path, ["buses"]).for_city("sydney")
+    rec = recorder(
+        tmp_path, FakeClient({"buses": [vp("a")]}), store,
+        clock=lambda: utc(2026, 10, 16, 1, 11), on_positions=broken,
     )
     rec.poll_once(store.get())
     st = rec.status()["buses"]

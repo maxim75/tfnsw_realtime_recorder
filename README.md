@@ -1,27 +1,86 @@
 # tfnsw-realtime-recorder
 
-Records Transport for NSW **live vehicle positions** (GTFS-Realtime) into
+Records **live vehicle positions** (GTFS-Realtime) of several cities (Sydney
+from Transport for NSW and Prague from PID/Golemio are configured) into
 10-minute gzipped CSV files per feed and uploads each finished file to
-S3-compatible storage (Hetzner Object Storage). A small web page shows the
-recorder's status and lets you switch feeds on/off and change the polling
-interval. Uses [tfnsw_trip_planner](https://github.com/maxim75/tfnsw_trip_planner).
+S3-compatible storage (Hetzner Object Storage). One service records every
+configured city. A small web page shows each city's status and lets you switch
+feeds on/off and change the polling interval. Feeds are plain GTFS-Realtime
+URLs, configured per city in `recorder/cities.toml` (see [Cities](#cities)).
 
 ## Configuration
 
 | Variable | Required | Notes |
 |---|---|---|
-| `TFNSW_API_KEY` | yes | TfNSW Open Data key with *Realtime Vehicle Positions* enabled |
+| `TFNSW_API_KEY` | for Sydney | TfNSW Open Data key with *Realtime Vehicle Positions* enabled. Without it Sydney is disabled (logged and shown on the status page) and the other cities keep recording |
 | `ADMIN_USER`, `ADMIN_PASSWORD` | yes | basic-auth login for the web page |
 | `S3_BUCKET` | to upload | without it, finished files stay in `DATA_DIR/complete/` |
 | `S3_ACCESS_KEY_ID`, `S3_SECRET_ACCESS_KEY` | with `S3_BUCKET` | Hetzner Console → Security → S3 credentials |
 | `S3_ENDPOINT_URL` | for Hetzner | `https://nbg1.your-objectstorage.com` |
 | `S3_REGION` | no | derived from the Hetzner endpoint (`nbg1`) |
-| `S3_PREFIX` | no | default `vehiclepos` |
+| `S3_PREFIX` | no | overrides Sydney's prefix only (default `vehiclepos`); other cities use the `s3_prefix` in `cities.toml` |
+| `CITIES_FILE` | no | path of an alternative cities file (default `recorder/cities.toml`) |
 | `DATA_DIR` | no | default `/data` in Docker, `./data` with `main.py` |
 | `PORT` | no | default `8729` |
 
-Feeds and interval are set on the web page and stored in
-`DATA_DIR/settings.json` (default: 10 Sydney-area feeds every 30 s).
+Prague needs no API key. Each city's feeds and interval are set on the web
+page and stored in `DATA_DIR/settings.json` (defaults come from `cities.toml`:
+10 Sydney-area feeds every 30 s; Prague's single feed every 30 s).
+
+## Cities
+
+Cities are defined in `recorder/cities.toml`, one top-level section per city
+(the section name is the city id: lowercase letters, digits and `-`). The
+first enabled city is the default one. Trimmed example:
+
+```toml
+[prague]
+name = "Prague"
+timezone = "Europe/Prague"
+center = [14.44, 50.08]               # lon, lat of the map start
+zoom = 11
+s3_prefix = "vehiclepos/city=prague"
+attribution = "Golemio / PID (CC BY 4.0)"
+interval = 30                         # default poll interval, s
+max_requests_per_second = 1
+static_gtfs = "https://data.pid.cz/PID_GTFS.zip"   # optional, see below
+default_feeds = ["all"]
+
+  [[prague.feeds]]
+  id = "all"
+  url = "https://api.golemio.cz/v2/vehiclepositions/gtfsrt/vehicle_positions.pb"
+  mode = "bus"     # fallback when a route is not in routes.txt
+```
+
+Optional settings: `daily_quota` (requests/day, shown and warned about on the
+status page; Sydney only), `headers` (e.g.
+`{ Authorization = "apikey ${TFNSW_API_KEY}" }`) and `route_label`.
+
+**Adding a city:** you need a GTFS-Realtime *vehicle positions* feed (a URL
+returning the protobuf). Add a section like the one above with at least
+`name`, `timezone`, `center`, `zoom`, `s3_prefix`, `attribution`, `interval`,
+`max_requests_per_second`, `default_feeds` and one or more `[[<id>.feeds]]`
+(`id`, `url`, `mode`). Then:
+
+- `static_gtfs` (optional) is the URL of the city's static GTFS zip. The
+  recorder reads `routes.txt` from it (refreshed daily) for line names and
+  modes (bus, tram, rail, ...); without it, vehicles show the route id and the
+  feed's `mode`.
+- `route_label` (optional) is `{ pattern = '<regex>' }` with a named group
+  `label` that extracts the displayed line name from the route id, e.g.
+  Sydney's `_(?P<label>[^_]+)$` turns `2510_333` into `333`.
+- `headers` (optional) are sent with every request; `${ENV_NAME}` is replaced
+  by that environment variable. If one is unset, the city is loaded as
+  disabled and the others keep running.
+- Restart the service. No code changes are needed.
+
+**Where data goes.** In S3, each city has its own prefix: Sydney keeps the
+existing `vehiclepos/feed=…`, Prague uses `vehiclepos/city=prague/feed=…`
+(same layout below the prefix, see [Output](#output)). Locally, each city has
+its own folder, `DATA_DIR/<city>/{open,complete,playback}`. On the first start
+after upgrading from the single-city version, the old `DATA_DIR/open`,
+`complete` and `playback` folders are moved to `DATA_DIR/sydney/` automatically
+(once; nothing to do by hand).
 
 ## Feeds
 
@@ -40,15 +99,27 @@ Also available:
 `regionbuses/riverinamurray`, `regionbuses/riverinamurray2`,
 `regionbuses/southeasttablelands`, `regionbuses/southeasttablelands2`
 
-Each feed is fetched from the API version that serves live data (`V2_FEEDS` in
-`recorder/feeds.py`): `sydneytrains`, `metro` and `lightrail/innerwest` from
-`/v2/gtfs/vehiclepos/`, everything else from `/v1/gtfs/vehiclepos/`. On
+These are Sydney's feeds. Each feed's URL (and so its API version) is set in
+`recorder/cities.toml`: `sydneytrains`, `metro` and `lightrail/innerwest` use
+`/v2/gtfs/vehiclepos/`, everything else `/v1/gtfs/vehiclepos/`. On
 2026-10-16, `sydneytrains` and `lightrail/innerwest` returned 404 on v1, v1
 `metro` had not updated for about two years, and no other feed existed on v2.
 
 The web page shows each feed's version and marks a feed **stale** when its
 newest GPS report is more than 10 minutes old (also logged as a warning).
 `ferries/MFF` was stale (about 107 days) when this was written.
+
+Prague has a single feed, `all` (every PID vehicle: buses, trams, metro, trains
+and ferries; line names and modes come from PID's static GTFS).
+
+### Prague data licence
+
+Prague data comes from PID (Prague Integrated Transport) through the Golemio
+API. PID's open-data page states the data is under CC BY (credit the author and
+indicate changes): <https://pid.cz/en/?p=131727>. The real-time feed's own
+terms were not confirmed separately. For systematic use, contact
+opendata@pid.cz. The map shows the attribution configured as `attribution` in
+`cities.toml`.
 
 ## Run locally
 
@@ -82,7 +153,7 @@ with `docker compose down` (add `-v` to also delete the recordings volume).
 Tools run inside the container, for example:
 
 ```bash
-docker compose exec recorder python -m recorder.playback --date yesterday
+docker compose exec recorder python -m recorder.playback --city sydney --date yesterday
 ```
 
 Don't run it while the Coolify deployment records into the same bucket:
@@ -90,14 +161,14 @@ every feed would be recorded twice.
 
 ## Output
 
-Each feed gets one file per 10-minute window (Sydney time), e.g. 12:10–12:20:
+Each feed gets one file per 10-minute window (in the city's local time; Sydney shown), e.g. 12:10–12:20:
 
 ```
 vehiclepos/feed=buses/date=2026-10-16/buses_2026-10-16T12-10+1100.csv.gz
 ```
 
 The `+1100`/`+1000` offset keeps the repeated hour at the end of daylight
-saving unique. A window cut short by a restart, or a feed switched off and on
+saving unique (Prague's looks like `vehiclepos/city=prague/feed=all/date=…/all_…+0200.csv.gz`). A window cut short by a restart, or a feed switched off and on
 again, continues in `..._p2.csv.gz`; existing objects are never overwritten.
 An upload retried after an ambiguous failure (e.g. a timeout after S3 stored
 the object) can occasionally create a `_pN` duplicate; deduplicate on
@@ -111,7 +182,7 @@ occasional `403`/`AccessDenied` lines in the logs are expected. A persistent
 
 | column | notes |
 |---|---|
-| `fetched_at` | when the recorder polled (Sydney time) |
+| `fetched_at` | when the recorder polled (city local time) |
 | `timestamp` | GPS report time from the vehicle |
 | `vehicle_id`, `trip_id`, `route_id` | GTFS identifiers |
 | `latitude`, `longitude` | WGS84 |
@@ -124,10 +195,25 @@ SELECT * FROM read_csv('s3://<bucket>/vehiclepos/feed=buses/date=2026-10-16/*.cs
                        hive_partitioning = true);
 ```
 
+## Web pages and API
+
+All pages use the same login (`ADMIN_USER` / `ADMIN_PASSWORD`).
+
+- **Status page `/`:** one tab per city (the first enabled city is shown by
+  default). A city without its credentials shows as disabled with the reason.
+- **Map `/map`:** a city picker at the top. The city and, in Playback, the time
+  are in the URL hash, so links can be shared: `/map#prague` opens Prague live,
+  `/map#prague/17:30` opens Prague playback at 17:30 (city local time).
+- **API:** `/api/status`, `/api/settings` (PUT), `/api/live`,
+  `/api/live/stream` and `/api/history/window` take `?city=<id>`; without it
+  they use the default city (the first enabled one: Sydney unless it is disabled). `/api/cities` lists the cities with their
+  timezone, map centre, attribution, modes and whether they are enabled. An
+  unknown city returns 404.
+
 ## Live map
 
-`/map` (same login as the status page) shows every vehicle the recorder is
-polling on a zoomable Sydney map, moving smoothly. It uses
+`/map` shows every vehicle the recorder is
+polling in the selected city on a zoomable map (Sydney shown below), moving smoothly. It uses
 [MapLibre GL JS](https://maplibre.org) with [OpenFreeMap](https://openfreemap.org)
 vector tiles (no API key) and [deck.gl](https://deck.gl) WebGL layers for the
 vehicles.
@@ -151,7 +237,7 @@ vehicles.
 ### Playback
 
 The **Playback** tab replays recorded data on the same map: pick a date and
-time (Sydney time), drag the time slider across the day, and play or pause
+time (city local time), drag the time slider across the day, and play or pause
 (space bar) at 1× to 120×. It opens 30 minutes in the past, playing at 10×,
 and stops when it reaches the present.
 
@@ -172,10 +258,12 @@ day's file once; the server then serves that day's windows from it (about
 
 ```bash
 uv run build_playback.py --date 2026-10-16     # or --date yesterday / today
+uv run build_playback.py --city prague --date yesterday
 ```
 
-It downloads the day's recordings from S3 and writes
-`DATA_DIR/playback/<date>.sqlite` (one compressed block per 10-minute window,
+`--city` (default `sydney`) picks the city from `cities.toml`; `--date` is the
+city's local date. It downloads the day's recordings from S3 and writes
+`DATA_DIR/<city>/playback/<date>.sqlite` (one compressed block per 10-minute window,
 in the format the map loads; an evening of all buses is a few MB, a full day
 roughly 50–100 MB). Windows that may still change (the last ~25 minutes) are
 left out, so building `today` is safe and later windows keep coming from S3.
@@ -183,10 +271,11 @@ Rebuilding replaces the file.
 
 On Coolify, run it inside the container, where `DATA_DIR` and the S3
 variables are already set, e.g. as a **Scheduled Task** each night after
-midnight Sydney time:
+midnight local time, once per city:
 
 ```bash
-python -m recorder.playback --date yesterday
+python -m recorder.playback --city sydney --date yesterday
+python -m recorder.playback --city prague --date yesterday
 ```
 
 Bus `vehicle_id`s include the trip, so a bus starting a new trip appears as a
@@ -196,21 +285,25 @@ new vehicle.
 
 The public site [tfnsw-playback-map](https://github.com/maxim75/tfnsw-playback-map)
 replays one day from static files. Create them with `export_static.py`, which
-reads the day from S3 (or from a built `data/playback/<date>.sqlite`) and writes
-`index.json` plus one compact gzip file per 10-minute window:
+reads the day from S3 (or from a built `DATA_DIR/<city>/playback/<date>.sqlite`)
+and writes `<out>/<city>/index.json` plus one compact gzip file per 10-minute
+window, and `<out>/cities.json` listing the cities exported there (data
+format 2; the site's city picker reads it):
 
 ```bash
 uv run export_static.py --date 2026-10-17 --out ../tfnsw-playback-map/data
+uv run export_static.py --city prague --date 2026-10-17 --out ../tfnsw-playback-map/data
 ```
 
-`--date` takes `YYYY-MM-DD`, `today` or `yesterday` (default). Only finished
-windows are written (15 minutes after each ends), and the output directory's
-previous day is replaced. Then commit and push `data/` in the site repository;
+`--city` (default `sydney`) and `--date` (`YYYY-MM-DD`, `today` or
+`yesterday`, the default; city local date) select the day. Only finished
+windows are written (15 minutes after each ends), and that city's previous
+day in the output directory is replaced; other cities' folders are kept. Then commit and push `data/` in the site repository;
 its README has the full steps.
 
 ## Map in kepler.gl
 
-`export_csv.py` downloads the recorded files for a date and time range from
+`export_csv.py` downloads the recorded files of a city for a date and time range from
 the bucket and combines them into one CSV for <https://kepler.gl/demo>. It uses
 the `S3_*` variables from the environment or `.env`.
 
@@ -218,17 +311,19 @@ the `S3_*` variables from the environment or `.env`.
 uv run export_csv.py --date 2026-10-16 --feed buses --route 333     # one route, whole day
 uv run export_csv.py --date 2026-10-16 --from 07:00 --to 09:00 --feed sydneytrains
 uv run export_csv.py --date 2026-10-16 --from 18:00 --to 18:30 --feed all
+uv run export_csv.py --city prague --date 2026-10-16 --feed all
 ```
 
-Options: `--date` (Sydney date, default today), `--from`/`--to` (`HH:MM`,
+Options: `--city` (default `sydney`; feed names are those in `cities.toml`, and
+`--feed all` means every feed of that city), `--date` (city-local date, default today), `--from`/`--to` (`HH:MM`,
 `--to` exclusive, `24:00` allowed), `--feed` (repeatable, or `all`; default
-`buses`), `--route` (route name such as `333`, or the full `route_id`;
-repeatable), `--max-age` (minutes, default 15: drops reports whose GPS time is
+the city's first feed), `--route` (route or line name such as `333` or Prague's `B`, or the full
+`route_id`; repeatable), `--max-age` (minutes, default 15: drops reports whose GPS time is
 that much older than the poll; some vehicles send fixes years old), `-o` (output
 file; by default it's named after the options, e.g. `buses_333_2026-10-16.csv`).
 
 The CSV has the recorded columns plus `feed` and `time` (GPS time as
-`YYYY-MM-DD HH:MM:SS`, Sydney local). Repeated reports of the same vehicle
+`YYYY-MM-DD HH:MM:SS`, city local). Repeated reports of the same vehicle
 position are written once.
 
 In kepler.gl: **Add Data** → drop the CSV (points are placed from `latitude`/
@@ -241,6 +336,9 @@ range.
 ## API limits
 
 - **Rate:** ~5 requests/second; the recorder spaces requests 0.2 s apart.
+These are TfNSW's limits and apply to Sydney; Prague has no daily quota
+configured (it is polled at most once per second).
+
 - **Daily quota:** 60,000 requests by default. Requests/day =
   `feeds × 86400 / interval`; the page shows the estimate and turns red above
   the quota. 10 feeds at 30 s = 28,800/day.
@@ -270,6 +368,20 @@ the `ports:` mapping if it clashes with something else on the server.
    S3_SECRET_ACCESS_KEY=...
    ```
 
+   Prague needs no new variables. The first start after upgrading moves the old
+   Sydney folders in the `/data` volume automatically. After the first
+   10-minute window, check that Prague objects appear in the bucket under
+   `vehiclepos/city=prague/` and that Sydney uploads continue under
+   `vehiclepos/feed=…`.
+
+   **Upgrading from the single-city version:** stop the old container before
+   the new one starts (no rolling overlap on the same `/data` volume), because
+   the first start moves the old Sydney folders and recovers open files.
+   **Rolling back:** after the first start the old image no longer sees
+   `DATA_DIR/sydney/complete` or the new `settings.json` format. Move
+   `sydney/{open,complete,playback}` back up into `DATA_DIR` and restore a flat
+   settings file.
+
 5. **Health check:** leave Coolify's own health check disabled. It runs
    inside the container with curl/wget, which the slim image does not have.
    The image's Docker `HEALTHCHECK` (Python, hits `/healthz` every 30 s)
@@ -279,7 +391,7 @@ the `ports:` mapping if it clashes with something else on the server.
    the upload drain up to 15 s). Set the container stop timeout to 35 s if
    Coolify offers it (e.g. via custom Docker run options: `--stop-timeout 35`). Otherwise the last partial window is
    uploaded after the next start, so nothing is lost.
-7. Run **one** instance only; two would record every feed twice.
+7. Run **one** instance only; two would record every feed of every city twice.
 8. Use a long, random `ADMIN_PASSWORD` and expose the page only over the
    HTTPS domain (basic auth sends the password with every request).
 9. Logs: one INFO summary line per poll cycle (feeds, vehicles, new rows,

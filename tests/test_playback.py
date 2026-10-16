@@ -2,11 +2,18 @@ import gzip
 import json
 from datetime import date, datetime
 
-from recorder.history import History
+from recorder.cities import load_cities
+from recorder.history import History as _History
 from recorder.playback import build_day, day_file, parse_args, read_window
 from recorder.windows import SYDNEY_TZ
 
 from test_history import FakeS3, csv_bytes, row, s3_key
+
+SYDNEY = load_cities(env={})["sydney"]
+
+
+def History(*args, **kwargs):
+    return _History(*args, city=SYDNEY, **kwargs)
 
 DAY = date(2026, 10, 16)
 W1800 = int(datetime(2026, 10, 16, 18, 0, tzinfo=SYDNEY_TZ).timestamp())
@@ -67,6 +74,7 @@ def test_parse_args():
     args = parse_args(["--date", "2026-10-16"])
     assert args.date == "2026-10-16" and args.data_dir is None
     assert parse_args([]).date == "today"
+    assert parse_args([]).city == "sydney" and parse_args(["--city", "prague"]).city == "prague"
 
 
 def test_build_skips_windows_that_may_still_change(tmp_path):
@@ -81,6 +89,98 @@ def test_resolve_date():
     from recorder.playback import resolve_date
 
     now = datetime(2026, 10, 16, 0, 30, tzinfo=SYDNEY_TZ).timestamp()  # 13:30 UTC on the 15th
-    assert resolve_date("yesterday", now) == date(2026, 10, 15)
-    assert resolve_date("today", now) == date(2026, 10, 16)
-    assert resolve_date("2026-01-02", now) == date(2026, 1, 2)
+    assert resolve_date("yesterday", SYDNEY_TZ, now) == date(2026, 10, 15)
+    assert resolve_date("today", SYDNEY_TZ, now) == date(2026, 10, 16)
+    assert resolve_date("2026-01-02", SYDNEY_TZ, now) == date(2026, 1, 2)
+
+
+def test_day_windows_counts_by_zone_and_dst():
+    from zoneinfo import ZoneInfo
+
+    from recorder.playback import day_windows
+
+    prague = ZoneInfo("Europe/Prague")
+    assert len(day_windows(date(2026, 10, 16), prague)) == 144
+    assert len(day_windows(date(2026, 10, 25), prague)) == 150  # DST ends
+    assert len(day_windows(date(2026, 3, 29), prague)) == 138  # DST starts
+    assert len(day_windows(date(2026, 4, 5), SYDNEY_TZ)) == 150
+
+
+def test_resolve_date_uses_the_given_zone():
+    from zoneinfo import ZoneInfo
+
+    from recorder.playback import resolve_date
+
+    now = datetime(2026, 10, 16, 23, 30, tzinfo=ZoneInfo("UTC")).timestamp()  # 01:30 on the 17th in Prague
+    assert resolve_date("today", ZoneInfo("Europe/Prague"), now) == date(2026, 10, 17)
+    assert resolve_date("today", ZoneInfo("America/New_York"), now) == date(2026, 10, 16)
+
+
+def test_main_builds_into_the_city_folder(tmp_path, monkeypatch):
+    import recorder.config as config
+    import recorder.uploader as uploader
+    from recorder.playback import main
+
+    monkeypatch.setattr(config, "load_dotenv", lambda *a, **k: None)
+    for name, value in {"S3_BUCKET": "bucket", "S3_ACCESS_KEY_ID": "id", "S3_SECRET_ACCESS_KEY": "s"}.items():
+        monkeypatch.setenv(name, value)
+    monkeypatch.delenv("S3_PREFIX", raising=False)
+    monkeypatch.setattr(uploader, "make_s3_client", lambda s3: fixture_s3())
+    assert main(["--date", "2026-10-16", "--data-dir", str(tmp_path)]) == 0
+    assert read_window(tmp_path / "sydney", W1800) is not None
+    assert main(["--city", "prague", "--date", "2026-10-16", "--data-dir", str(tmp_path)]) == 0
+    assert (tmp_path / "prague" / "playback" / "2026-10-16.sqlite").is_file()
+
+
+def test_day_files_live_in_each_citys_folder(tmp_path):
+    cities = load_cities(env={})
+    sydney, prague = tmp_path / "sydney", tmp_path / "prague"
+    assert day_file(sydney, DAY) == tmp_path / "sydney" / "playback" / "2026-10-16.sqlite"
+    build_day(History(fixture_s3(), "bucket", "vehiclepos", sydney), DAY, day_file(sydney, DAY))
+    assert read_window(sydney, W1800) is not None
+    assert read_window(prague, W1800) is None  # other city's folder has no day file
+    assert cities["prague"].timezone.key == "Europe/Prague"
+
+
+def test_prague_day_is_bounded_in_prague_time(tmp_path):
+    from zoneinfo import ZoneInfo
+
+    from recorder.playback import day_windows
+
+    tz = ZoneInfo("Europe/Prague")
+    starts = day_windows(date(2026, 10, 16), tz)
+    assert datetime.fromtimestamp(starts[0], tz=tz).strftime("%Y-%m-%d %H:%M") == "2026-10-16 00:00"
+    assert datetime.fromtimestamp(starts[-1], tz=tz).strftime("%H:%M") == "23:50"
+    w = int(datetime(2026, 10, 16, 18, 0, tzinfo=tz).timestamp())
+    path = day_file(tmp_path, date(2026, 10, 16))
+    path.parent.mkdir(parents=True)
+    import sqlite3
+    with sqlite3.connect(path) as db:
+        db.execute("CREATE TABLE windows (start INTEGER PRIMARY KEY, reports INTEGER, body BLOB)")
+        db.execute("INSERT INTO windows VALUES (?, 1, ?)", (w, b"x"))
+    assert read_window(tmp_path, w, tz) == b"x"
+
+
+def test_main_labels_come_from_refreshed_routes(tmp_path, monkeypatch):
+    import recorder.config as config
+    import recorder.history as history
+    import recorder.uploader as uploader
+    from recorder.playback import main
+    from test_routes import FakeSession, _ok
+
+    session = FakeSession(_ok())
+    monkeypatch.setattr("recorder.routes.requests.get", session.get)
+    monkeypatch.setattr(config, "load_dotenv", lambda *a, **k: None)
+    for name, value in {"S3_BUCKET": "bucket", "S3_ACCESS_KEY_ID": "id", "S3_SECRET_ACCESS_KEY": "s"}.items():
+        monkeypatch.setenv(name, value)
+    monkeypatch.setattr(uploader, "make_s3_client", lambda s3: FakeS3({}))
+    seen = []
+
+    class Spy(history.History):
+        def __init__(self, *args, **kwargs):
+            seen.append(kwargs["routes"])
+            super().__init__(*args, **kwargs)
+
+    monkeypatch.setattr(history, "History", Spy)
+    main(["--city", "prague", "--date", "2026-10-16", "--data-dir", str(tmp_path)])
+    assert len(session.calls) == 1 and seen[0].label("L992") == "B"

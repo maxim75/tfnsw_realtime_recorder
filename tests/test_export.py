@@ -157,3 +157,51 @@ def test_stale_gps_reports_are_dropped():
 def test_max_age_option():
     assert parse_args([]).max_age == 15
     assert parse_args(["--max-age", "0"]).max_age == 0  # 0 keeps every report
+
+
+def test_city_option_defaults_to_sydney_and_checks_the_city_feeds():
+    assert parse_args([]).city == "sydney"
+    args = parse_args(["--city", "prague", "--feed", "all", "--date", "2026-10-16"])
+    assert args.city == "prague" and args.feed == ["all"]
+    assert args.prefix == "vehiclepos/city=prague" and args.tz.key == "Europe/Prague"
+    assert default_output(args) == "prague_all_2026-10-16.csv"
+    with pytest.raises(SystemExit):
+        parse_args(["--city", "prague", "--feed", "buses"])
+    with pytest.raises(SystemExit):
+        parse_args(["--city", "atlantis"])
+
+
+def test_prague_export_uses_prague_time():
+    from zoneinfo import ZoneInfo
+
+    prague = ZoneInfo("Europe/Prague")
+    start, end = time_range("2026-10-16", "12:00", "13:00", prague)
+    assert start == datetime(2026, 10, 16, 12, tzinfo=prague)
+    k = "vehiclepos/city=prague/feed=all/date=2026-10-16/all_2026-10-16T12-10+0200.csv.gz"
+    objects = {k: gz_csv([row("bus-7", "2026-10-16T12:10:20+02:00", route="L136")])}
+    out = io.StringIO()
+    files, rows = export(FakeS3(objects), "b", "vehiclepos/city=prague", ["all"], start, end, set(), out, tz=prague)
+    assert (files, rows) == (1, 1)
+    assert list(csv.DictReader(io.StringIO(out.getvalue())))[0]["time"] == "2026-10-16 12:10:20"
+
+
+def test_route_matches_line_label():
+    from recorder.export import route_matches
+
+    label = {"L991": "B"}.get
+    assert route_matches("L991", {"B"}, lambda r: label(r, r))
+    assert not route_matches("L992", {"B"}, lambda r: label(r, r))
+    assert route_matches("2510_333", {"333"})  # id forms still work without a label
+
+
+def test_export_route_filter_uses_label():
+    k = "vehiclepos/city=prague/feed=all/date=2026-10-16/all_2026-10-16T12-10+0200.csv.gz"
+    objects = {k: gz_csv([row("x", "2026-10-16T12:10:20+02:00", route="L991"),
+                          row("y", "2026-10-16T12:10:20+02:00", route="L22")])}
+    from zoneinfo import ZoneInfo
+    prague = ZoneInfo("Europe/Prague")
+    start, end = time_range("2026-10-16", "12:00", "13:00", prague)
+    out = io.StringIO()
+    _, rows = export(FakeS3(objects), "b", "vehiclepos/city=prague", ["all"], start, end, {"B"}, out,
+                     tz=prague, label=lambda r: "B" if r == "L991" else r)
+    assert rows == 1

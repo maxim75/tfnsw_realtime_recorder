@@ -11,18 +11,21 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
-from tfnsw_trip_planner import TripPlannerError
-
-from .config import Settings, SettingsStore
-from .feeds import MAX_REQUESTS_PER_SECOND, STALE_AFTER_S, feed_version
+from .cities import City
+from .config import CitySettings, Settings, SettingsStore
+from .feeds import STALE_AFTER_S
+from .gtfsrt import FetchError, GtfsRtClient
+from .routes import RouteInfo
+from .storage import city_dir
 from .windows import SYDNEY_TZ
 from .writer import RotatingWriter
 
 log = logging.getLogger(__name__)
 
 
-def new_rows(positions, last_seen: dict, fetched_at: datetime) -> list[dict[str, str]]:
+def new_rows(positions, last_seen: dict, fetched_at: datetime, tz: ZoneInfo = SYDNEY_TZ) -> list[dict[str, str]]:
     """Rows for positions whose GPS timestamp changed since the last poll."""
     rows = []
     present = set()
@@ -36,8 +39,8 @@ def new_rows(positions, last_seen: dict, fetched_at: datetime) -> list[dict[str,
         last_seen[key] = p.timestamp
         rows.append(
             {
-                "fetched_at": fetched_at.astimezone(SYDNEY_TZ).isoformat(timespec="seconds"),
-                "timestamp": p.timestamp.isoformat() if p.timestamp else "",
+                "fetched_at": fetched_at.astimezone(tz).isoformat(timespec="seconds"),
+                "timestamp": p.timestamp.astimezone(tz).isoformat() if p.timestamp else "",
                 "vehicle_id": p.vehicle_id or "",
                 "trip_id": p.trip_id or "",
                 "route_id": p.route_id or "",
@@ -74,24 +77,37 @@ class FeedStatus:
 
 
 class Recorder:
+    """Polls one city's enabled feeds and writes their window files.
+
+    *settings* is the `SettingsStore` (or a one-city view of it with ``get()``);
+    files go to ``DATA_DIR/<city>/`` under *data_dir*. *client* is used only by
+    this recorder's thread.
+    """
+
     def __init__(
         self,
-        client,
-        settings: SettingsStore,
+        client: GtfsRtClient,
+        city: City,
+        settings: SettingsStore | CitySettings,
         data_dir: Path,
         on_complete: Callable[[Path], None],
         *,
-        request_spacing: float = 1 / MAX_REQUESTS_PER_SECOND,
-        clock: Callable[[], datetime] = lambda: datetime.now(tz=SYDNEY_TZ),
+        routes: RouteInfo,
+        request_spacing: float | None = None,
+        clock: Callable[[], datetime] | None = None,
         on_fatal: Callable[[], None] = terminate_process,
         on_positions: Callable[[str, datetime, list], None] | None = None,
     ) -> None:
         self._client = client
-        self._settings = settings
-        self._data_dir = data_dir
+        self.city = city
+        self.routes = routes  # the city's line names and modes (for callers of this recorder)
+        self._settings = settings.for_city(city.id) if isinstance(settings, SettingsStore) else settings
+        self._data_dir = city_dir(data_dir, city.id)
         self._on_complete = on_complete
-        self._spacing = request_spacing
-        self._clock = clock
+        # stay under the city's rate limit
+        self._spacing = 1 / city.max_requests_per_second if request_spacing is None else request_spacing
+        self._tz = tz = city.timezone
+        self._clock = clock or (lambda: datetime.now(tz=tz))
         self._on_fatal = on_fatal
         self._on_positions = on_positions  # live map; must never affect recording
         self._writers: dict[str, RotatingWriter] = {}
@@ -107,7 +123,7 @@ class Recorder:
 
     def start(self) -> None:
         self.started_at = self._clock()
-        self._thread = threading.Thread(target=self._run, name="recorder", daemon=True)
+        self._thread = threading.Thread(target=self._run, name=f"recorder-{self.city.id}", daemon=True)
         self._thread.start()
 
     def stop(self, timeout: float = 10.0) -> None:
@@ -139,7 +155,7 @@ class Recorder:
                     self.tick(self._clock(), self._settings.get())
         except Exception:
             self._crashed = True
-            log.exception("Recorder crashed")
+            log.exception("%s: recorder crashed", self.city.id)
         finally:
             for feed in list(self._writers):
                 try:
@@ -168,7 +184,7 @@ class Recorder:
                 vehicles += v
                 new += r
         if polled:
-            log.info("cycle: feeds=%d vehicles=%d new_rows=%d errors=%d", polled, vehicles, new, errors)
+            log.info("%s cycle: feeds=%d vehicles=%d new_rows=%d errors=%d", self.city.id, polled, vehicles, new, errors)
 
     def tick(self, now: datetime, settings: Settings) -> None:
         """Between polls: close ended windows and feeds that were disabled."""
@@ -188,20 +204,20 @@ class Recorder:
         """Poll one feed. Returns (vehicles, new rows), or (None, 0) on error."""
         fetched_at = self._clock()
         try:
-            positions = self._client.vehicle_positions(feed, version=feed_version(feed))
+            positions = self._client.fetch(self.city.feed(feed).url, self.city.headers)
             seen = dict(self._last_seen.get(feed, {}))
-            rows = new_rows(positions, seen, fetched_at)
+            rows = new_rows(positions, seen, fetched_at, self._tz)
             writer = self._writers.get(feed)
             if writer is None:
-                writer = self._writers[feed] = RotatingWriter(feed, self._data_dir, self._on_complete)
+                writer = self._writers[feed] = RotatingWriter(feed, self._data_dir, self._on_complete, tz=self._tz)
             writer.write(fetched_at, rows)
             self._last_seen[feed] = seen  # only after a successful write
-        except TripPlannerError as exc:
-            log.warning("%s: %s", feed, exc)
+        except FetchError as exc:
+            log.warning("%s/%s: %s", self.city.id, feed, exc)
             self._record_error(feed, fetched_at, exc)
             return None, 0
-        except Exception as exc:  # library leaks e.g. ChunkedEncodingError; disk errors; bad data
-            log.exception("%s: unexpected error", feed)
+        except Exception as exc:  # disk errors, bad data, bugs
+            log.exception("%s/%s: unexpected error", self.city.id, feed)
             self._record_error(feed, fetched_at, exc)
             return None, 0
         log.debug("%-34s vehicles=%5d new=%5d", feed, len(positions), len(rows))
@@ -211,7 +227,7 @@ class Recorder:
         with self._lock:
             st = self._status.setdefault(feed, FeedStatus())
             if stale and not st.stale:
-                log.warning("%s: newest GPS report is %.0f s old; the feed looks stale", feed, data_age_s)
+                log.warning("%s/%s: newest GPS report is %.0f s old; the feed looks stale", self.city.id, feed, data_age_s)
             st.data_age_s = data_age_s
             st.stale = stale
             st.last_poll_at = fetched_at
