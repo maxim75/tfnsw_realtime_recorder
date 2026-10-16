@@ -1,0 +1,35 @@
+# Recorder service: web pages on port 8000, recordings and settings in the
+# "recorder-data" volume. Configuration comes from .env (see README.md).
+#
+#   docker compose up -d --build     # start (rebuilds after code changes)
+#   docker compose logs -f           # follow logs
+#   docker compose down              # stop (uploads the open window first)
+name: tfnsw-recorder
+
+services:
+  recorder:
+    build: .
+    image: tfnsw-recorder
+    restart: unless-stopped
+    env_file:
+      - path: .env
+        required: false  # on Coolify the variables come from its UI instead
+    environment:
+      DATA_DIR: /data
+      PORT: "8000"
+    ports:
+      - "${RECORDER_PORT:-8000}:8000"
+    volumes:
+      - recorder-data:/data
+    # Shutdown cuts open map streams after 3 s, stops the recorder (<=10 s) and
+    # uploads the open window (<=15 s); Docker's default of 10 s is too short.
+    stop_grace_period: 35s
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "5"
+    # The image defines a HEALTHCHECK on /healthz.
+
+volumes:
+  recorder-data:

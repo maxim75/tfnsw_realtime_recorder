@@ -66,6 +66,28 @@ Tests:
 uv run pytest
 ```
 
+### With Docker Compose
+
+`compose.yaml` builds the image and runs it with the variables from `.env`, a
+`recorder-data` volume for `/data`, a 35 s stop grace period (so the open
+window is uploaded on stop), automatic restarts and rotated logs:
+
+```bash
+docker compose up -d --build
+```
+
+Open <http://127.0.0.1:8000> (set `RECORDER_PORT=8080` in the shell or `.env`
+to publish another port). Follow the logs with `docker compose logs -f`; stop
+with `docker compose down` (add `-v` to also delete the recordings volume).
+Tools run inside the container, for example:
+
+```bash
+docker compose exec recorder python -m recorder.playback --date yesterday
+```
+
+Don't run it while the Coolify deployment records into the same bucket:
+every feed would be recorded twice.
+
 ## Output
 
 Each feed gets one file per 10-minute window (Sydney time), e.g. 12:10–12:20:
@@ -207,6 +229,12 @@ range.
   the quota. 10 feeds at 30 s = 28,800/day.
 
 ## Deploy to Coolify
+
+The steps below use the **Dockerfile** build pack. Coolify's **Docker
+Compose** build pack can use `compose.yaml` instead, which already sets the
+volume, stop grace period and log rotation; in that case enter the variables in
+Coolify, assign the domain to the `recorder` service on port 8000, and remove
+the `ports:` mapping if it clashes with something else on the server.
 
 1. **New Resource → Public/Private Repository**, pick this repo, build pack
    **Dockerfile**.
