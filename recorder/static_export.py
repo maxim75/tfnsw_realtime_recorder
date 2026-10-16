@@ -154,10 +154,23 @@ def update_cities_index(root: Path, city, day: date, order: list[str]) -> None:
     Entries follow *order* (the ids in ``cities.toml``); unknown ids go last.
     """
     path = root / "cities.json"
+    entries = {}
     try:
-        entries = {c["id"]: c for c in json.loads(path.read_text())["cities"]}
-    except (FileNotFoundError, ValueError, KeyError, TypeError):
-        entries = {}
+        text = path.read_text()
+    except FileNotFoundError:
+        text = None  # first export into this directory: start empty
+    if text is not None:
+        try:
+            listed = json.loads(text)["cities"]
+            if not isinstance(listed, list):
+                raise TypeError("'cities' is not a list")
+        except (ValueError, KeyError, TypeError) as exc:
+            raise ValueError(f"cannot update {path}: unreadable or malformed ({exc}); fix or remove it") from exc
+        for c in listed:
+            if isinstance(c, dict) and c.get("id"):
+                entries[c["id"]] = c
+            else:
+                log.warning("skipping entry without an id in %s: %r", path, c)
     entries[city.id] = {
         "id": city.id,
         "name": city.name,
@@ -189,6 +202,7 @@ def main(argv: list[str] | None = None) -> int:
     from .cities import load_cities
     from .config import ConfigError, S3Config, load_dotenv
     from .history import History
+    from .routes import prepare_routes
     from .storage import city_dir
     from .uploader import make_s3_client
 
@@ -210,7 +224,8 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     data_dir = city_dir(args.data_dir or Path(os.environ.get("DATA_DIR") or "data"), city.id)
     client = make_s3_client(s3) if s3 else None
-    history = History(client, s3.bucket if s3 else None, city.s3_prefix, data_dir, city=city)
+    history = History(client, s3.bucket if s3 else None, city.s3_prefix, data_dir, city=city,
+                      routes=prepare_routes(city, data_dir))
     started = time.monotonic()
     out = args.out / city.id
     summary = export_day(history, day, out)

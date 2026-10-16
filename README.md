@@ -206,7 +206,7 @@ All pages use the same login (`ADMIN_USER` / `ADMIN_PASSWORD`).
   `/map#prague/17:30` opens Prague playback at 17:30 (city local time).
 - **API:** `/api/status`, `/api/settings` (PUT), `/api/live`,
   `/api/live/stream` and `/api/history/window` take `?city=<id>`; without it
-  they use the default city (Sydney). `/api/cities` lists the cities with their
+  they use the default city (the first enabled one: Sydney unless it is disabled). `/api/cities` lists the cities with their
   timezone, map centre, attribution, modes and whether they are enabled. An
   unknown city returns 404.
 
@@ -317,8 +317,8 @@ uv run export_csv.py --city prague --date 2026-10-16 --feed all
 Options: `--city` (default `sydney`; feed names are those in `cities.toml`, and
 `--feed all` means every feed of that city), `--date` (city-local date, default today), `--from`/`--to` (`HH:MM`,
 `--to` exclusive, `24:00` allowed), `--feed` (repeatable, or `all`; default
-the city's first feed), `--route` (route name such as `333`, or the full `route_id`;
-repeatable), `--max-age` (minutes, default 15: drops reports whose GPS time is
+the city's first feed), `--route` (route or line name such as `333` or Prague's `B`, or the full
+`route_id`; repeatable), `--max-age` (minutes, default 15: drops reports whose GPS time is
 that much older than the poll; some vehicles send fixes years old), `-o` (output
 file; by default it's named after the options, e.g. `buses_333_2026-10-16.csv`).
 
@@ -373,6 +373,14 @@ the `ports:` mapping if it clashes with something else on the server.
    10-minute window, check that Prague objects appear in the bucket under
    `vehiclepos/city=prague/` and that Sydney uploads continue under
    `vehiclepos/feed=…`.
+
+   **Upgrading from the single-city version:** stop the old container before
+   the new one starts (no rolling overlap on the same `/data` volume), because
+   the first start moves the old Sydney folders and recovers open files.
+   **Rolling back:** after the first start the old image no longer sees
+   `DATA_DIR/sydney/complete` or the new `settings.json` format. Move
+   `sydney/{open,complete,playback}` back up into `DATA_DIR` and restore a flat
+   settings file.
 
 5. **Health check:** leave Coolify's own health check disabled. It runs
    inside the container with curl/wget, which the slim image does not have.

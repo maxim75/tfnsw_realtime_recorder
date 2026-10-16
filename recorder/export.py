@@ -16,9 +16,12 @@ import csv
 import gzip
 import io
 import logging
+import os
 import re
 import sys
+from collections.abc import Callable
 from datetime import date, datetime, time, timedelta
+from pathlib import Path
 from typing import TextIO
 from zoneinfo import ZoneInfo
 
@@ -70,9 +73,13 @@ def read_rows(client, bucket: str, key: str) -> list[dict[str, str]]:
     return list(csv.DictReader(io.StringIO(gzip.decompress(body).decode())))
 
 
-def route_matches(route_id: str, routes: set[str]) -> bool:
-    """Match ``2510_333`` by full id or by route name (the part after the last ``_``)."""
-    return not routes or route_id in routes or route_id.rsplit("_", 1)[-1] in routes
+def route_matches(route_id: str, routes: set[str], label: Callable[[str], str] | None = None) -> bool:
+    """Match ``2510_333`` by full id or by route name (the part after the last ``_``).
+
+    With *label* (``RouteInfo.label``) the line's display name matches too, so
+    ``--route B`` finds Prague's line B whose id is ``L991``."""
+    return (not routes or route_id in routes or route_id.rsplit("_", 1)[-1] in routes
+            or (label is not None and label(route_id) in routes))
 
 
 def export(
@@ -86,6 +93,7 @@ def export(
     out: TextIO,
     max_age: timedelta | None = None,
     tz: ZoneInfo = SYDNEY_TZ,
+    label: Callable[[str], str] | None = None,
 ) -> tuple[int, int]:
     """Write matching rows to *out*; returns (files read, rows written). Times are in *tz*.
 
@@ -106,7 +114,7 @@ def export(
                 fetched_at = datetime.fromisoformat(row["fetched_at"])
                 if not start <= fetched_at < end:
                     continue
-                if not route_matches(row["route_id"], routes):
+                if not route_matches(row["route_id"], routes, label):
                     continue
                 if last_ts.get(row["vehicle_id"]) == row["timestamp"]:
                     continue
@@ -158,7 +166,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument(
         "--route", action="append", default=[],
-        help="only this route, e.g. 333 or 2510_333; repeatable",
+        help="only this route or line name, e.g. 333, 2510_333 or B; repeatable",
     )
     parser.add_argument(
         "--max-age", type=float, default=15, metavar="MINUTES",
@@ -208,12 +216,18 @@ def main(argv: list[str] | None = None) -> int:
         log.error("S3_BUCKET is not set (environment or .env)")
         return 2
 
+    label = None
+    if args.route:  # line names (``--route B``) need the city's route mapping
+        from .routes import prepare_routes
+        from .storage import city_dir
+        city = load_cities()[args.city]
+        label = prepare_routes(city, city_dir(Path(os.environ.get("DATA_DIR") or "data"), city.id)).label
     out_path = args.out or default_output(args)
     log.info("Exporting %s, %s to %s, from s3://%s/%s", ", ".join(args.feed), start, end, s3.bucket, args.prefix)
     with open(out_path, "w", newline="") as out:
         files, rows = export(
             make_s3_client(s3), s3.bucket, args.prefix, args.feeds, start, end, set(args.route), out,
-            max_age=timedelta(minutes=args.max_age) if args.max_age else None, tz=args.tz,
+            max_age=timedelta(minutes=args.max_age) if args.max_age else None, tz=args.tz, label=label,
         )
     log.info("Wrote %d rows from %d files to %s", rows, files, out_path)
     if rows == 0:

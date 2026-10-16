@@ -183,3 +183,25 @@ def test_prague_export_uses_prague_time():
     files, rows = export(FakeS3(objects), "b", "vehiclepos/city=prague", ["all"], start, end, set(), out, tz=prague)
     assert (files, rows) == (1, 1)
     assert list(csv.DictReader(io.StringIO(out.getvalue())))[0]["time"] == "2026-10-16 12:10:20"
+
+
+def test_route_matches_line_label():
+    from recorder.export import route_matches
+
+    label = {"L991": "B"}.get
+    assert route_matches("L991", {"B"}, lambda r: label(r, r))
+    assert not route_matches("L992", {"B"}, lambda r: label(r, r))
+    assert route_matches("2510_333", {"333"})  # id forms still work without a label
+
+
+def test_export_route_filter_uses_label():
+    k = "vehiclepos/city=prague/feed=all/date=2026-10-16/all_2026-10-16T12-10+0200.csv.gz"
+    objects = {k: gz_csv([row("x", "2026-10-16T12:10:20+02:00", route="L991"),
+                          row("y", "2026-10-16T12:10:20+02:00", route="L22")])}
+    from zoneinfo import ZoneInfo
+    prague = ZoneInfo("Europe/Prague")
+    start, end = time_range("2026-10-16", "12:00", "13:00", prague)
+    out = io.StringIO()
+    _, rows = export(FakeS3(objects), "b", "vehiclepos/city=prague", ["all"], start, end, {"B"}, out,
+                     tz=prague, label=lambda r: "B" if r == "L991" else r)
+    assert rows == 1

@@ -167,3 +167,52 @@ def test_prague_export_uses_prague_day_bounds(tmp_path):
     index = json.loads((tmp_path / "out" / "index.json").read_text())
     assert index["timezone"] == "Europe/Prague" and index["city"] == "prague"
     assert index["end"] - index["start"] == 25 * 3600
+
+
+def test_main_labels_come_from_refreshed_routes(tmp_path, monkeypatch):
+    import recorder.config as config
+    import recorder.history as history
+    import recorder.static_export as static_export
+    import recorder.uploader as uploader
+    from test_routes import FakeSession, _ok
+
+    session = FakeSession(_ok())
+    monkeypatch.setattr("recorder.routes.requests.get", session.get)
+    monkeypatch.setattr(config, "load_dotenv", lambda *a, **k: None)
+    for name, value in {"S3_BUCKET": "bucket", "S3_ACCESS_KEY_ID": "id", "S3_SECRET_ACCESS_KEY": "s"}.items():
+        monkeypatch.setenv(name, value)
+    monkeypatch.setattr(uploader, "make_s3_client", lambda s3: FakeS3({}))
+    seen = []
+
+    class Spy(history.History):
+        def __init__(self, *args, **kwargs):
+            seen.append(kwargs["routes"])
+            super().__init__(*args, **kwargs)
+
+    monkeypatch.setattr(history, "History", Spy)
+    args = ["--city", "prague", "--date", "2026-10-15", "--out", str(tmp_path / "o"), "--data-dir", str(tmp_path / "rec")]
+    assert static_export.main(args) == 0
+    assert len(session.calls) == 1 and seen[0].label("L992") == "B"
+
+
+def test_cities_index_rejects_a_corrupt_file_instead_of_dropping_cities(tmp_path):
+    import pytest
+    from recorder.static_export import update_cities_index
+
+    sydney = load_cities(env={})["sydney"]
+    path = tmp_path / "cities.json"
+    for bad in ("{not json", "[]", '{"cities": 3}'):
+        path.write_text(bad)
+        with pytest.raises(ValueError, match="cities.json"):
+            update_cities_index(tmp_path, sydney, DAY, ["sydney"])
+        assert path.read_text() == bad  # untouched
+
+
+def test_cities_index_skips_entries_without_an_id(tmp_path, caplog):
+    from recorder.static_export import update_cities_index
+
+    sydney = load_cities(env={})["sydney"]
+    (tmp_path / "cities.json").write_text(json.dumps({"cities": [{"name": "nameless"}, {"id": "zzz", "name": "Z"}]}))
+    update_cities_index(tmp_path, sydney, DAY, ["sydney"])
+    ids = [c["id"] for c in json.loads((tmp_path / "cities.json").read_text())["cities"]]
+    assert ids == ["sydney", "zzz"] and "without an id" in caplog.text
