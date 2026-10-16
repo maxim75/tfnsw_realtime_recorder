@@ -40,6 +40,18 @@ def _is_denial(exc: Exception) -> bool:
     )
 
 
+def retry_denials(fn, *args, delay: float = 0.5, **kwargs):
+    """Call *fn*, retrying spurious 403/AccessDenied up to DENIAL_RETRIES times."""
+    for attempt in range(DENIAL_RETRIES + 1):
+        try:
+            return fn(*args, **kwargs)
+        except Exception as exc:
+            if attempt == DENIAL_RETRIES or not _is_denial(exc):
+                raise
+            log.debug("Spurious denial (%s), retrying", exc)
+            time.sleep(delay * (attempt + 1))
+
+
 def object_key(prefix: str, path: Path) -> str:
     """``{prefix}/feed={feed_dir}/date={YYYY-MM-DD}/{name}`` for a file in ``complete/<feed_dir>/``."""
     feed_dir = path.parent.name
@@ -171,15 +183,7 @@ class Uploader:
         return True
 
     def _retry_denials(self, fn, *args, **kwargs):
-        """Call *fn*, retrying spurious 403/AccessDenied up to DENIAL_RETRIES times."""
-        for attempt in range(DENIAL_RETRIES + 1):
-            try:
-                return fn(*args, **kwargs)
-            except Exception as exc:
-                if attempt == DENIAL_RETRIES or not _is_denial(exc):
-                    raise
-                log.debug("Spurious denial (%s), retrying", exc)
-                time.sleep(self._denial_retry_delay * (attempt + 1))
+        return retry_denials(fn, *args, delay=self._denial_retry_delay, **kwargs)
 
     def _exists(self, key: str, client_error: type[Exception]) -> bool:
         try:

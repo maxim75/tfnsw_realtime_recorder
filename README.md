@@ -92,6 +92,36 @@ SELECT * FROM read_csv('s3://<bucket>/vehiclepos/feed=buses/date=2026-10-16/*.cs
                        hive_partitioning = true);
 ```
 
+## Map in kepler.gl
+
+`export_csv.py` downloads the recorded files for a date and time range from
+the bucket and combines them into one CSV for <https://kepler.gl/demo>. It uses
+the `S3_*` variables from the environment or `.env`.
+
+```bash
+uv run export_csv.py --date 2026-10-16 --feed buses --route 333     # one route, whole day
+uv run export_csv.py --date 2026-10-16 --from 07:00 --to 09:00 --feed sydneytrains
+uv run export_csv.py --date 2026-10-16 --from 18:00 --to 18:30 --feed all
+```
+
+Options: `--date` (Sydney date, default today), `--from`/`--to` (`HH:MM`,
+`--to` exclusive, `24:00` allowed), `--feed` (repeatable, or `all`; default
+`buses`), `--route` (route name such as `333`, or the full `route_id`;
+repeatable), `--max-age` (minutes, default 15: drops reports whose GPS time is
+that much older than the poll; some vehicles send fixes years old), `-o` (output
+file; by default it's named after the options, e.g. `buses_333_2026-10-16.csv`).
+
+The CSV has the recorded columns plus `feed` and `time` (GPS time as
+`YYYY-MM-DD HH:MM:SS`, Sydney local). Repeated reports of the same vehicle
+position are written once.
+
+In kepler.gl: **Add Data** → drop the CSV (points are placed from `latitude`/
+`longitude`) → **Filters** → add a filter on `time` and press play to animate.
+Colour the layer by `route_id` or `speed` if you like. Keep the export to a
+few hundred thousand rows at most: all buses for a whole day is about 2.5
+million rows, too many for the browser, so pick a route or a shorter time
+range.
+
 ## API limits
 
 - **Rate:** ~5 requests/second; the recorder spaces requests 0.2 s apart.

@@ -50,6 +50,31 @@ class S3Config:
     secret_access_key: str
     prefix: str
 
+    @classmethod
+    def from_env(cls, env: Mapping[str, str] | None = None) -> "S3Config | None":
+        """S3 settings alone (for tools that don't run the recorder); None if no bucket."""
+        s3, missing = _s3_from_env(os.environ if env is None else env)
+        if missing:
+            raise ConfigError("Missing environment variables: " + ", ".join(missing))
+        return s3
+
+
+def _s3_from_env(env: Mapping[str, str]) -> tuple[S3Config | None, list[str]]:
+    get = lambda name: env.get(name, "").strip()  # noqa: E731
+    if not get("S3_BUCKET"):
+        return None, []
+    missing = [n for n in ("S3_ACCESS_KEY_ID", "S3_SECRET_ACCESS_KEY") if not get(n)]
+    endpoint = get("S3_ENDPOINT_URL") or None
+    s3 = S3Config(
+        endpoint_url=endpoint,
+        region=get("S3_REGION") or derive_region(endpoint),
+        bucket=get("S3_BUCKET"),
+        access_key_id=get("S3_ACCESS_KEY_ID"),
+        secret_access_key=get("S3_SECRET_ACCESS_KEY"),
+        prefix=get("S3_PREFIX").strip("/") or "vehiclepos",
+    )
+    return s3, missing
+
 
 @dataclass(frozen=True)
 class EnvConfig:
@@ -66,18 +91,8 @@ class EnvConfig:
         get = lambda name: env.get(name, "").strip()  # noqa: E731
 
         missing = [n for n in ("TFNSW_API_KEY", "ADMIN_USER", "ADMIN_PASSWORD") if not get(n)]
-        s3 = None
-        if get("S3_BUCKET"):
-            missing += [n for n in ("S3_ACCESS_KEY_ID", "S3_SECRET_ACCESS_KEY") if not get(n)]
-            endpoint = get("S3_ENDPOINT_URL") or None
-            s3 = S3Config(
-                endpoint_url=endpoint,
-                region=get("S3_REGION") or derive_region(endpoint),
-                bucket=get("S3_BUCKET"),
-                access_key_id=get("S3_ACCESS_KEY_ID"),
-                secret_access_key=get("S3_SECRET_ACCESS_KEY"),
-                prefix=get("S3_PREFIX").strip("/") or "vehiclepos",
-            )
+        s3, s3_missing = _s3_from_env(env)
+        missing += s3_missing
         if missing:
             raise ConfigError("Missing environment variables: " + ", ".join(missing))
 
