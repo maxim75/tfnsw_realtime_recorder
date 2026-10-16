@@ -15,7 +15,8 @@ from fastapi.responses import FileResponse, PlainTextResponse, Response, Streami
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from tfnsw_trip_planner import TripPlannerClient
 
-from .config import EnvConfig, SettingsStore
+from .cities import load_cities
+from .config import CitySettings, EnvConfig, SettingsStore
 from .feeds import DAILY_REQUEST_QUOTA, KNOWN_FEEDS, feed_version
 from .history import History
 from .live import LiveHub
@@ -34,7 +35,7 @@ SSE_HEARTBEAT_S = 15.0  # keeps proxies (Coolify's Traefik) from closing idle st
 @dataclass
 class Components:
     env: EnvConfig
-    settings: SettingsStore
+    settings: CitySettings  # Sydney's; Task 6 makes this per city
     recorder: Any
     uploader: Any
     live: LiveHub = field(default_factory=LiveHub)
@@ -46,7 +47,8 @@ def build_components(env: EnvConfig) -> Components:
     recovered = recover_open_files(env.data_dir)
     if recovered:
         log.info("Recovered %d unfinished files from a previous run", len(recovered))
-    settings = SettingsStore(env.data_dir / "settings.json")
+    cities = load_cities()
+    settings = SettingsStore(env.data_dir / "settings.json", cities).for_city("sydney")
     s3 = env.s3
     s3_client = make_s3_client(s3) if s3 else None
     uploader = Uploader(

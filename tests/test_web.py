@@ -1,6 +1,7 @@
 import pytest
 from fastapi.testclient import TestClient
 
+from recorder.cities import load_cities
 from recorder.config import EnvConfig, SettingsStore
 from recorder.recorder import FeedStatus
 from recorder.web import Components, create_app
@@ -43,7 +44,7 @@ def ctx(tmp_path):
         data_dir=tmp_path, port=8729, s3=None,
     )
     comps = Components(
-        env=env, settings=SettingsStore(tmp_path / "settings.json"),
+        env=env, settings=SettingsStore(tmp_path / "settings.json", load_cities()).for_city("sydney"),
         recorder=FakeRecorder(), uploader=FakeUploader(),
     )
     with TestClient(create_app(env, comps)) as client:
@@ -153,7 +154,7 @@ def test_uploader_stopped_even_if_recorder_stop_raises(tmp_path):
     )
     uploader = RecordingUploader()
     comps = Components(
-        env=env, settings=SettingsStore(tmp_path / "settings.json"),
+        env=env, settings=SettingsStore(tmp_path / "settings.json", load_cities()).for_city("sydney"),
         recorder=FailingRecorder(), uploader=uploader,
     )
     with pytest.raises(RuntimeError, match="stop failed"):

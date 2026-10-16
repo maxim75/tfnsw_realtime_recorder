@@ -5,6 +5,7 @@ import pytest
 import requests
 from tfnsw_trip_planner import APIError, VehiclePosition
 
+from recorder.cities import load_cities
 from recorder.config import Settings, SettingsStore
 from recorder.recorder import Recorder, new_rows
 from recorder.windows import SYDNEY_TZ
@@ -37,7 +38,7 @@ class FakeClient:
 
 
 def make(tmp_path, responses, feeds=("buses",), interval=30, now=utc(2026, 10, 16, 1, 11)):
-    store = SettingsStore(tmp_path / "settings.json")
+    store = SettingsStore(tmp_path / "settings.json", load_cities()).for_city("sydney")
     store.update({"feeds": list(feeds), "interval": interval})
     clock = [now]
     done = []
@@ -225,7 +226,7 @@ def test_stop_keeps_closing_writers_when_one_close_fails(tmp_path):
         if path.name.startswith("buses_"):
             raise RuntimeError("upload queue broken")
 
-    store = SettingsStore(tmp_path / "settings.json")
+    store = SettingsStore(tmp_path / "settings.json", load_cities()).for_city("sydney")
     store.update({"feeds": ["buses", "metro"], "interval": 30})
     rec = Recorder(
         FakeClient({"buses": [vp("a")], "metro": [vp("m")]}), store, tmp_path, on_complete,
@@ -271,7 +272,7 @@ def test_empty_feed_has_no_data_age(tmp_path):
 
 def test_positions_are_passed_to_live_view_after_each_poll(tmp_path):
     seen = []
-    store = SettingsStore(tmp_path / "settings.json")
+    store = SettingsStore(tmp_path / "settings.json", load_cities()).for_city("sydney")
     store.update({"feeds": ["buses", "metro"], "interval": 30})
     rec = Recorder(
         FakeClient({"buses": [vp("a")], "metro": APIError("API error 500")}), store, tmp_path,
@@ -286,7 +287,7 @@ def test_live_view_errors_do_not_affect_recording(tmp_path):
     def broken(*_):
         raise RuntimeError("live view bug")
 
-    store = SettingsStore(tmp_path / "settings.json")
+    store = SettingsStore(tmp_path / "settings.json", load_cities()).for_city("sydney")
     store.update({"feeds": ["buses"], "interval": 30})
     rec = Recorder(
         FakeClient({"buses": [vp("a")]}), store, tmp_path, lambda p: None,

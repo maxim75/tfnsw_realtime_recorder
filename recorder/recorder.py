@@ -15,7 +15,7 @@ from zoneinfo import ZoneInfo
 
 from tfnsw_trip_planner import TripPlannerError
 
-from .config import Settings, SettingsStore
+from .config import CitySettings, Settings
 from .feeds import MAX_REQUESTS_PER_SECOND, STALE_AFTER_S, feed_version
 from .windows import SYDNEY_TZ
 from .writer import RotatingWriter
@@ -78,7 +78,7 @@ class Recorder:
     def __init__(
         self,
         client,
-        settings: SettingsStore,
+        settings: CitySettings,
         data_dir: Path,
         on_complete: Callable[[Path], None],
         *,
