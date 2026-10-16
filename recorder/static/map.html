@@ -76,6 +76,7 @@
 <script>
 const api = (path) => new URL(path, location.origin);  // origin never carries user:pass@
 const $ = (id) => document.getElementById(id);
+const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
 // Modes in display order; a city lists only the ones it has (from /api/cities).
 const MODES = [
   ["metro", "Metro", [22, 128, 128]],
@@ -202,7 +203,7 @@ function zoneEpoch(date, secs, tz) {
 const clockText = (epoch) => fmtFor("clock", city.timezone).format(new Date(epoch * 1000));
 
 // --- filters -----------------------------------------------------------------
-let enabledModes = new Set(), routeFilter;
+let hiddenModes = new Set(), routeFilter;  // only modes the user unticked are hidden
 function buildModes() {  // one checkbox per mode the city has, all on
   const have = new Set(city.modes);
   $("feeds").innerHTML = MODES.filter(([m]) => have.has(m)).map(([m, name]) =>
@@ -211,13 +212,13 @@ function buildModes() {  // one checkbox per mode the city has, all on
   readFilters();
 }
 function readFilters() {
-  enabledModes = new Set([...document.querySelectorAll("#feeds input:checked")].map((i) => i.value));
+  hiddenModes = new Set([...document.querySelectorAll("#feeds input:not(:checked)")].map((i) => i.value));
   const routes = $("routes").value.split(/[\s,]+/).filter(Boolean).map((s) => s.toUpperCase());
   routeFilter = routes.length ? new Set(routes) : null;
   live.version++; play.version++;
 }
 $("routes").addEventListener("input", readFilters);
-const visible = (v) => enabledModes.has(v.mode) && (!routeFilter || routeFilter.has(v.label.toUpperCase()) || routeFilter.has(v.route.toUpperCase()));
+const visible = (v) => !hiddenModes.has(v.mode) && (!routeFilter || routeFilter.has(v.label.toUpperCase()) || routeFilter.has(v.route.toUpperCase()));
 
 // --- map ---------------------------------------------------------------------
 const dark = matchMedia("(prefers-color-scheme: dark)").matches;
@@ -241,8 +242,8 @@ const timeOfDay = (ts) => new Date(ts * 1000).toLocaleTimeString("en-AU", { time
 const overlay = new deck.MapboxOverlay({
   interleaved: true,
   getTooltip: ({ object: d }) => d && {
-    html: `<b>${d.v.mode === "bus" ? "Route" : ""} ${d.v.label || "—"}</b> <span style="opacity:.7">${d.v.feed}</span><br>` +
-          `Vehicle ${d.v.vid}<br>${d.speed == null ? "" : `${Math.round(d.speed * 3.6)} km/h · `}report ${timeOfDay(d.ts)}`,
+    html: `<b>${d.v.mode === "bus" ? "Route" : ""} ${esc(d.v.label) || "—"}</b> <span style="opacity:.7">${esc(d.v.feed)}</span><br>` +
+          `Vehicle ${esc(d.v.vid)}<br>${d.speed == null ? "" : `${Math.round(d.speed * 3.6)} km/h · `}report ${timeOfDay(d.ts)}`,
     style: { fontSize: "12px", padding: "6px 8px" },
   },
 });
@@ -463,7 +464,7 @@ function frame(now) {
     const cur = play.windows.get(w);
     let msg;
     if (buffering) msg = `<span class="muted">Loading ${timeOfDay(w).slice(0, 5)}…</span>`;
-    else if (cur && cur.state === "error") msg = `<span class="bad">Could not load ${timeOfDay(w).slice(0, 5)} (${cur.error})</span>`;
+    else if (cur && cur.state === "error") msg = `<span class="bad">Could not load ${timeOfDay(w).slice(0, 5)} (${esc(cur.error)})</span>`;
     else if (!n && cur && cur.state === "empty") msg = `<span class="muted">No recorded data at this time</span>`;
     else msg = `${n.toLocaleString()} vehicles`;
     if (play.t >= latestPlayable() - 1 && !play.playing) msg += ` <span class="muted">· reached the present</span>`;
@@ -516,12 +517,21 @@ function initialCity() {
   const wanted = cities.find((c) => c.id === id) || cities.find((c) => c.id === recalledCity());
   return { id: (wanted || cities.find((c) => c.enabled) || cities[0]).id, time: wanted && wanted.id === id ? time : null };
 }
-$("city").addEventListener("change", () => selectCity($("city").value));
+// Re-read /api/cities on a switch so modes found since the page loaded (e.g. after a GTFS download) get checkboxes.
+async function reloadCities() {
+  try {
+    const r = await fetch(api("/api/cities"));
+    if (r.ok) { const fresh = await r.json(); if (fresh.length) cities = fresh; }
+  } catch (e) { /* keep the list we have */ }
+}
+$("city").addEventListener("change", async () => { const id = $("city").value; await reloadCities(); selectCity(id); });
 window.addEventListener("hashchange", () => {
   const { id, time } = parseHash();
   if (!cities.some((c) => c.id === id)) return;
-  if (id !== city.id) selectCity(id, { time });
-  else if (time) selectCity(id, { time, fly: false });
+  reloadCities().then(() => {
+    if (id !== city.id) selectCity(id, { time });
+    else if (time) selectCity(id, { time, fly: false });
+  });
 });
 
 async function init() {
@@ -531,7 +541,11 @@ async function init() {
     cities = await r.json();
   } catch (e) { $("state").textContent = `Could not load cities (${e.message})`; return; }
   if (!cities.length) { $("state").textContent = "No cities configured"; return; }
-  $("city").innerHTML = cities.map((c) => `<option value="${c.id}">${c.name}${c.enabled ? "" : " (disabled)"}</option>`).join("");
+  $("city").replaceChildren(...cities.map((c) => {
+    const o = document.createElement("option");
+    o.value = c.id; o.textContent = c.name + (c.enabled ? "" : " (disabled)");
+    return o;
+  }));
   await mapLoaded;
   const { id, time } = initialCity();
   selectCity(id, { fly: false, time });

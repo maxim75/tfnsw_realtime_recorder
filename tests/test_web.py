@@ -509,7 +509,7 @@ def test_status_for_prague(ctx):
     body = client.get("/api/status?city=prague", auth=AUTH).json()
     assert body["city"] == "prague"
     assert [f["feed"] for f in body["feeds"]] == ["all"]
-    assert body["feeds"][0]["version"] == "v2"  # from /v2/ in the feed URL
+    assert body["feeds"][0]["version"] is None  # only TfNSW feeds carry a v1/v2 tag
     assert body["quota"]["daily_quota"] is None
     assert client.get("/api/status", auth=AUTH).json()["city"] == "sydney"
 
@@ -556,3 +556,11 @@ def test_history_window_uses_city_history(ctx, tmp_path):
     assert r.json()["feeds"]["all"][0][:2] == ["p", "L22"]
     comps.cities["prague"].history = None
     assert client.get(f"/api/history/window?city=prague&start={start}", auth=AUTH).status_code == 503
+
+
+def test_api_version_only_for_tfnsw_hosts():
+    from recorder.web import _api_version
+
+    assert _api_version("https://api.transport.nsw.gov.au/v2/gtfs/vehiclepos/metro") == "v2"
+    assert _api_version("https://api.transport.nsw.gov.au/v1/gtfs/vehiclepos/buses") == "v1"
+    assert _api_version("https://api.golemio.cz/v2/vehiclepositions/gtfsrt/vehicle_positions.pb") is None

@@ -12,6 +12,7 @@ from contextlib import asynccontextmanager
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 from fastapi import Body, Depends, FastAPI, Header, HTTPException, Query, Request
 from fastapi.responses import FileResponse, PlainTextResponse, Response, StreamingResponse
@@ -36,6 +37,7 @@ SSE_POLL_S = 1.0  # how often an open stream checks the hub for new batches
 SSE_HEARTBEAT_S = 15.0  # keeps proxies (Coolify's Traefik) from closing idle streams
 RECORDER_STOP_S = 10.0  # each city's recorder closes its files within this (fetch timeout 8 s)
 
+TFNSW_HOST = "api.transport.nsw.gov.au"
 _API_VERSION = re.compile(r"/(v\d+)/")
 
 
@@ -112,6 +114,9 @@ def _stop_recorders(recorders: list) -> None:
 
 
 def _api_version(url: str) -> str | None:
+    """TfNSW API version (v1/v2) of a feed URL; other providers' paths carry no such version."""
+    if urlsplit(url).hostname != TFNSW_HOST:
+        return None
     match = _API_VERSION.search(url)
     return match.group(1) if match else None
 
