@@ -111,3 +111,24 @@ def test_unexpected_exception_marks_recorder_dead(tmp_path):
     while rec.alive and time.monotonic() < deadline:
         time.sleep(0.01)
     assert not rec.alive
+
+
+def test_stop_keeps_closing_writers_when_one_close_fails(tmp_path):
+    def on_complete(path):
+        if path.name.startswith("buses_"):
+            raise RuntimeError("upload queue broken")
+
+    store = SettingsStore(tmp_path / "settings.json")
+    store.update({"feeds": ["buses", "metro"], "interval": 30})
+    rec = Recorder(
+        FakeClient({"buses": [vp("a")], "metro": [vp("m")]}), store, tmp_path, on_complete,
+        request_spacing=0, clock=lambda: utc(2026, 10, 16, 1, 11),
+    )
+    rec.start()
+    deadline = time.monotonic() + 5
+    while len(rec.status()) < 2 and time.monotonic() < deadline:
+        time.sleep(0.01)
+    rec.stop(timeout=5)
+    assert not rec.alive
+    completed = {p.name for p in (tmp_path / "complete").glob("*/*.csv.gz")}
+    assert "metro_2026-10-16T12-10+1100.csv.gz" in completed

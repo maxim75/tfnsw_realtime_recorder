@@ -120,7 +120,10 @@ class Recorder:
             log.exception("Recorder crashed")
         finally:
             for feed in list(self._writers):
-                self._close(feed)
+                try:
+                    self._close(feed)
+                except Exception:
+                    log.exception("%s: failed to close window file", feed)
 
     def poll_once(self, settings: Settings) -> None:
         self._close_disabled(settings)
