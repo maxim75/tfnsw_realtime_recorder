@@ -1,9 +1,11 @@
 import time
 from datetime import datetime, timezone
 
+import pytest
+import requests
 from tfnsw_trip_planner import APIError, VehiclePosition
 
-from recorder.config import SettingsStore
+from recorder.config import Settings, SettingsStore
 from recorder.recorder import Recorder, new_rows
 from recorder.windows import SYDNEY_TZ
 
@@ -104,13 +106,116 @@ def test_thread_stop_closes_open_files(tmp_path):
     assert len(done) == 1
 
 
-def test_unexpected_exception_marks_recorder_dead(tmp_path):
-    rec, _, _, _ = make(tmp_path, {"buses": RuntimeError("bug")})
-    rec.start()
-    deadline = time.monotonic() + 5
-    while rec.alive and time.monotonic() < deadline:
+def wait_until(cond, timeout=5):
+    deadline = time.monotonic() + timeout
+    while not cond() and time.monotonic() < deadline:
         time.sleep(0.01)
+    return cond()
+
+
+class BrokenSettings:
+    def get(self):
+        raise RuntimeError("settings bug")
+
+
+def test_thread_fatal_error_marks_dead_and_calls_on_fatal(tmp_path):
+    fatal = []
+    rec = Recorder(
+        FakeClient({}), BrokenSettings(), tmp_path, lambda p: None,
+        request_spacing=0, on_fatal=lambda: fatal.append(1),
+    )
+    rec.start()
+    assert wait_until(lambda: fatal)
     assert not rec.alive
+
+
+def test_normal_stop_does_not_call_on_fatal(tmp_path):
+    fatal = []
+    rec, _, _, _ = make(tmp_path, {"buses": [vp("a")]})
+    rec._on_fatal = lambda: fatal.append(1)
+    rec.start()
+    assert wait_until(lambda: rec.status().get("buses"))
+    rec.stop(timeout=5)
+    assert fatal == []
+
+
+@pytest.mark.parametrize(
+    "exc", [RuntimeError("bug"), requests.exceptions.ChunkedEncodingError("cut off"), OverflowError("ts")]
+)
+def test_unexpected_feed_error_is_contained(tmp_path, exc):
+    rec, store, _, _ = make(
+        tmp_path, {"buses": exc, "metro": [vp("m")]}, feeds=("buses", "metro")
+    )
+    rec.poll_once(store.get())
+    status = rec.status()
+    assert status["buses"].last_error and status["buses"].last_error_at
+    assert status["metro"].rows_written_last_poll == 1
+
+
+def test_thread_survives_unexpected_feed_errors(tmp_path):
+    fatal = []
+    rec, store, _, _ = make(
+        tmp_path,
+        {"buses": requests.exceptions.ChunkedEncodingError("x"), "metro": [vp("m")]},
+        feeds=("buses", "metro"),
+    )
+    rec._on_fatal = lambda: fatal.append(1)
+    rec.start()
+    assert wait_until(lambda: rec.status().get("metro") and rec.status().get("buses"))
+    assert rec.alive and fatal == []
+    rec.stop(timeout=5)
+
+
+def test_write_failure_does_not_kill_recorder(tmp_path, monkeypatch):
+    rec, store, _, _ = make(tmp_path, {"buses": [vp("a")]})
+    from recorder import writer
+
+    def boom(*a, **k):
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(writer.gzip, "open", boom)
+    rec.poll_once(store.get())
+    assert "No space" in rec.status()["buses"].last_error
+    monkeypatch.undo()
+    rec.poll_once(store.get())  # recovers; row was not marked as seen
+    assert rec.status()["buses"].rows_written_last_poll == 1
+
+
+def test_new_rows_drops_vehicles_missing_from_poll():
+    seen = {}
+    fetched = utc(2026, 10, 16, 1, 11)
+    new_rows([vp("a"), vp("b")], seen, fetched)
+    new_rows([vp("a")], seen, fetched)
+    assert set(seen) == {"a"}
+    # documented trade-off: a vehicle that disappears and returns with the same
+    # timestamp is written again.
+    assert len(new_rows([vp("a"), vp("b")], seen, fetched)) == 1
+
+
+def test_new_rows_keeps_dedupe_state_for_skipped_positions():
+    seen = {}
+    fetched = utc(2026, 10, 16, 1, 11)
+    new_rows([vp("z")], seen, fetched)
+    new_rows([vp("a"), vp("z", lat=0.0, lon=0.0)], seen, fetched)  # z loses its fix
+    assert set(seen) == {"a", "z"}
+    assert new_rows([vp("z")], seen, fetched) == []  # same timestamp: still deduped
+
+
+def test_lowering_interval_applies_within_cycle(tmp_path):
+    class Store:
+        interval = 600
+
+        def get(self):
+            return Settings(feeds=("buses",), interval=self.interval)
+
+    store = Store()
+    client = FakeClient({"buses": [vp("a")]})
+    rec = Recorder(client, store, tmp_path, lambda p: None, request_spacing=0, on_fatal=lambda: None)
+    rec.start()
+    assert wait_until(lambda: len(client.calls) == 1)
+    store.interval = 1
+    assert wait_until(lambda: len(client.calls) >= 2, timeout=5)
+    rec.stop(timeout=5)
 
 
 def test_stop_keeps_closing_writers_when_one_close_fails(tmp_path):

@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import copy
 import logging
+import os
+import signal
 import threading
 import time
 from collections.abc import Callable
@@ -23,10 +25,12 @@ log = logging.getLogger(__name__)
 def new_rows(positions, last_seen: dict, fetched_at: datetime) -> list[dict[str, str]]:
     """Rows for positions whose GPS timestamp changed since the last poll."""
     rows = []
+    present = set()
     for p in positions:
+        key = p.vehicle_id or p.trip_id or f"{p.latitude},{p.longitude}"
+        present.add(key)
         if p.latitude == 0.0 and p.longitude == 0.0:
             continue  # no GPS fix
-        key = p.vehicle_id or p.trip_id or f"{p.latitude},{p.longitude}"
         if key in last_seen and last_seen[key] == p.timestamp:
             continue  # unchanged since last poll
         last_seen[key] = p.timestamp
@@ -43,7 +47,16 @@ def new_rows(positions, last_seen: dict, fetched_at: datetime) -> list[dict[str,
                 "speed": "" if p.speed is None else f"{p.speed:.2f}",
             }
         )
+    # Bound memory: forget vehicles absent from this poll (ids may be trip-scoped).
+    # Trade-off: one that disappears and returns with the same timestamp is written again.
+    for key in [k for k in last_seen if k not in present]:
+        del last_seen[key]
     return rows
+
+
+def terminate_process() -> None:
+    """Ask the process to shut down gracefully (uvicorn handles SIGTERM) so the restart policy acts."""
+    os.kill(os.getpid(), signal.SIGTERM)
 
 
 @dataclass
@@ -68,6 +81,7 @@ class Recorder:
         *,
         request_spacing: float = 1 / MAX_REQUESTS_PER_SECOND,
         clock: Callable[[], datetime] = lambda: datetime.now(tz=SYDNEY_TZ),
+        on_fatal: Callable[[], None] = terminate_process,
     ) -> None:
         self._client = client
         self._settings = settings
@@ -75,6 +89,7 @@ class Recorder:
         self._on_complete = on_complete
         self._spacing = request_spacing
         self._clock = clock
+        self._on_fatal = on_fatal
         self._writers: dict[str, RotatingWriter] = {}
         self._last_seen: dict[str, dict] = {}
         self._status: dict[str, FeedStatus] = {}
@@ -109,11 +124,14 @@ class Recorder:
     def _run(self) -> None:
         try:
             while not self._stop.is_set():
-                settings = self._settings.get()
-                wake = time.monotonic() + settings.interval
-                self.poll_once(settings)
-                while not self._stop.is_set() and time.monotonic() < wake:
-                    self._stop.wait(min(1.0, max(0.0, wake - time.monotonic())))
+                cycle_start = time.monotonic()
+                self.poll_once(self._settings.get())
+                while not self._stop.is_set():
+                    # Re-read each second so a lowered interval applies promptly.
+                    remaining = cycle_start + self._settings.get().interval - time.monotonic()
+                    if remaining <= 0:
+                        break
+                    self._stop.wait(min(1.0, remaining))
                     self.tick(self._clock(), self._settings.get())
         except Exception:
             self._crashed = True
@@ -124,15 +142,29 @@ class Recorder:
                     self._close(feed)
                 except Exception:
                     log.exception("%s: failed to close window file", feed)
+        if self._crashed:
+            try:
+                self._on_fatal()
+            except Exception:
+                log.exception("on_fatal failed")
 
     def poll_once(self, settings: Settings) -> None:
         self._close_disabled(settings)
+        polled = vehicles = new = errors = 0
         for n, feed in enumerate(settings.feeds):
             if self._stop.is_set():
-                return
+                break
             if n:
                 self._stop.wait(self._spacing)  # stay under the rate limit
-            self._poll_feed(feed)
+            v, r = self._poll_feed(feed)
+            polled += 1
+            if v is None:
+                errors += 1
+            else:
+                vehicles += v
+                new += r
+        if polled:
+            log.info("cycle: feeds=%d vehicles=%d new_rows=%d errors=%d", polled, vehicles, new, errors)
 
     def tick(self, now: datetime, settings: Settings) -> None:
         """Between polls: close ended windows and feeds that were disabled."""
@@ -141,24 +173,34 @@ class Recorder:
             writer.rotate_if_ended(now)
             self._sync_writer_status(feed)
 
-    def _poll_feed(self, feed: str) -> None:
+    def _record_error(self, feed: str, fetched_at: datetime, exc: Exception) -> None:
+        with self._lock:
+            st = self._status.setdefault(feed, FeedStatus())
+            st.last_poll_at = fetched_at
+            st.last_error = str(exc) or type(exc).__name__
+            st.last_error_at = fetched_at
+
+    def _poll_feed(self, feed: str) -> tuple[int | None, int]:
+        """Poll one feed. Returns (vehicles, new rows), or (None, 0) on error."""
         fetched_at = self._clock()
         try:
             positions = self._client.vehicle_positions(feed)
+            seen = dict(self._last_seen.get(feed, {}))
+            rows = new_rows(positions, seen, fetched_at)
+            writer = self._writers.get(feed)
+            if writer is None:
+                writer = self._writers[feed] = RotatingWriter(feed, self._data_dir, self._on_complete)
+            writer.write(fetched_at, rows)
+            self._last_seen[feed] = seen  # only after a successful write
         except TripPlannerError as exc:
             log.warning("%s: %s", feed, exc)
-            with self._lock:
-                st = self._status.setdefault(feed, FeedStatus())
-                st.last_poll_at = fetched_at
-                st.last_error = str(exc)
-                st.last_error_at = fetched_at
-            return
-        rows = new_rows(positions, self._last_seen.setdefault(feed, {}), fetched_at)
-        writer = self._writers.get(feed)
-        if writer is None:
-            writer = self._writers[feed] = RotatingWriter(feed, self._data_dir, self._on_complete)
-        writer.write(fetched_at, rows)
-        log.info("%-34s vehicles=%5d new=%5d", feed, len(positions), len(rows))
+            self._record_error(feed, fetched_at, exc)
+            return None, 0
+        except Exception as exc:  # library leaks e.g. ChunkedEncodingError; disk errors; bad data
+            log.exception("%s: unexpected error", feed)
+            self._record_error(feed, fetched_at, exc)
+            return None, 0
+        log.debug("%-34s vehicles=%5d new=%5d", feed, len(positions), len(rows))
         with self._lock:
             st = self._status.setdefault(feed, FeedStatus())
             st.last_poll_at = fetched_at
@@ -166,6 +208,7 @@ class Recorder:
             st.rows_written_last_poll = len(rows)
             st.total_rows += len(rows)
         self._sync_writer_status(feed)
+        return len(positions), len(rows)
 
     def _close_disabled(self, settings: Settings) -> None:
         for feed in [f for f in self._writers if f not in settings.feeds]:
