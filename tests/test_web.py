@@ -40,7 +40,7 @@ class FakeUploader:
 def ctx(tmp_path):
     env = EnvConfig(
         tfnsw_api_key="k", admin_user="admin", admin_password="secret",
-        data_dir=tmp_path, port=8000, s3=None,
+        data_dir=tmp_path, port=8729, s3=None,
     )
     comps = Components(
         env=env, settings=SettingsStore(tmp_path / "settings.json"),
@@ -149,7 +149,7 @@ class FailingRecorder(FakeRecorder):
 def test_uploader_stopped_even_if_recorder_stop_raises(tmp_path):
     env = EnvConfig(
         tfnsw_api_key="k", admin_user="admin", admin_password="secret",
-        data_dir=tmp_path, port=8000, s3=None,
+        data_dir=tmp_path, port=8729, s3=None,
     )
     uploader = RecordingUploader()
     comps = Components(

@@ -20,7 +20,7 @@ def test_env_without_s3_disables_uploads():
     cfg = EnvConfig.from_env(BASE_ENV)
     assert cfg.s3 is None
     assert cfg.data_dir == Path("/data")
-    assert cfg.port == 8000
+    assert cfg.port == 8729
 
 
 def test_env_missing_required_vars_lists_them():

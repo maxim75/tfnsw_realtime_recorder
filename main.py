@@ -1,4 +1,4 @@
-"""Run the recorder service locally (web page on http://127.0.0.1:8000).
+"""Run the recorder service locally (web page on http://127.0.0.1:8729).
 
     uv run main.py
 
@@ -19,7 +19,7 @@ def main() -> None:
         "recorder.web:create_app",
         factory=True,
         host="127.0.0.1",
-        port=int(os.environ.get("PORT", "8000")),
+        port=int(os.environ.get("PORT", "8729")),
         timeout_graceful_shutdown=3,  # open /map streams would otherwise delay the final uploads
     )
 

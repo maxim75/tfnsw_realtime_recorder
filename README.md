@@ -18,7 +18,7 @@ interval. Uses [tfnsw_trip_planner](https://github.com/maxim75/tfnsw_trip_planne
 | `S3_REGION` | no | derived from the Hetzner endpoint (`nbg1`) |
 | `S3_PREFIX` | no | default `vehiclepos` |
 | `DATA_DIR` | no | default `/data` in Docker, `./data` with `main.py` |
-| `PORT` | no | default `8000` |
+| `PORT` | no | default `8729` |
 
 Feeds and interval are set on the web page and stored in
 `DATA_DIR/settings.json` (default: 10 Sydney-area feeds every 30 s).
@@ -58,7 +58,7 @@ Put the variables in `.env`, then:
 uv run main.py
 ```
 
-Open <http://127.0.0.1:8000> and log in with `ADMIN_USER` / `ADMIN_PASSWORD`.
+Open <http://127.0.0.1:8729> and log in with `ADMIN_USER` / `ADMIN_PASSWORD`.
 
 Tests:
 
@@ -76,7 +76,7 @@ window is uploaded on stop), automatic restarts and rotated logs:
 docker compose up -d --build
 ```
 
-Open <http://127.0.0.1:8000> (set `RECORDER_PORT=8080` in the shell or `.env`
+Open <http://127.0.0.1:8729> (set `RECORDER_PORT=8080` in the shell or `.env`
 to publish another port). Follow the logs with `docker compose logs -f`; stop
 with `docker compose down` (add `-v` to also delete the recordings volume).
 Tools run inside the container, for example:
@@ -233,12 +233,12 @@ range.
 The steps below use the **Dockerfile** build pack. Coolify's **Docker
 Compose** build pack can use `compose.yaml` instead, which already sets the
 volume, stop grace period and log rotation; in that case enter the variables in
-Coolify, assign the domain to the `recorder` service on port 8000, and remove
+Coolify, assign the domain to the `recorder` service on port 8729, and remove
 the `ports:` mapping if it clashes with something else on the server.
 
 1. **New Resource → Public/Private Repository**, pick this repo, build pack
    **Dockerfile**.
-2. **Ports exposed:** `8000`; set a domain for the web page.
+2. **Ports exposed:** `8729`; set a domain for the web page.
 3. **Persistent storage:** add a volume mounted at `/data` (use a Docker
    volume, not a host bind mount, so the image's `app` user can write to it).
 4. **Environment variables:** everything from the table above, e.g.

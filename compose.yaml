@@ -1,4 +1,4 @@
-# Recorder service: web pages on port 8000, recordings and settings in the
+# Recorder service: web pages on port 8729, recordings and settings in the
 # "recorder-data" volume. Configuration comes from .env (see README.md).
 #
 #   docker compose up -d --build     # start (rebuilds after code changes)
@@ -16,9 +16,9 @@ services:
         required: false  # on Coolify the variables come from its UI instead
     environment:
       DATA_DIR: /data
-      PORT: "8000"
+      PORT: "8729"
     ports:
-      - "${RECORDER_PORT:-8000}:8000"
+      - "${RECORDER_PORT:-8729}:8729"
     volumes:
       - recorder-data:/data
     # Shutdown cuts open map streams after 3 s, stops the recorder (<=10 s) and

@@ -136,7 +136,7 @@ TfNSW feeds ──poll──▶ Recorder thread ──rows──▶ RotatingWrit
 | `S3_ACCESS_KEY_ID`, `S3_SECRET_ACCESS_KEY` | with `S3_BUCKET` | — (start fails if bucket set without them) |
 | `S3_PREFIX` | no | `vehiclepos` |
 | `DATA_DIR` | no | `/data` (`./data` when run via `main.py`) |
-| `PORT` | no | `8000` |
+| `PORT` | no | `8729` |
 
 A local `.env` file is loaded if present (existing minimal loader), never
 overriding real environment variables. Secrets are never logged or returned by
@@ -217,12 +217,12 @@ volume and nothing is lost.
 
 - `Dockerfile`: `python:3.12.12-slim-bookworm`, copy `uv` binary from
   `ghcr.io/astral-sh/uv` (pinned tag), `uv sync --frozen --no-dev`, non-root
-  user `app` owning `/data`, `EXPOSE 8000`, `HEALTHCHECK` with Python's
+  user `app` owning `/data`, `EXPOSE 8729`, `HEALTHCHECK` with Python's
   `urllib` hitting `/healthz` (no curl in slim image), `CMD` runs uvicorn via
   the venv.
 - `.dockerignore`: `.venv`, `data`, `.env`, `.git`, `__pycache__`.
 - README "Deploy to Coolify" section: new resource from the Git repo, build
-  pack Dockerfile, port 8000, domain, persistent storage mounted at `/data`,
+  pack Dockerfile, port 8729, domain, persistent storage mounted at `/data`,
   env vars (with the `nbg1` endpoint), stop grace 30 s, health check path
   `/healthz`.
 

@@ -101,7 +101,7 @@ class EnvConfig:
             admin_user=get("ADMIN_USER"),
             admin_password=get("ADMIN_PASSWORD"),
             data_dir=Path(get("DATA_DIR") or "/data"),
-            port=int(get("PORT") or 8000),
+            port=int(get("PORT") or 8729),
             s3=s3,
         )
 
