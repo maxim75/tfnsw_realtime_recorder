@@ -28,6 +28,7 @@ from pathlib import Path
 
 from .export import window_of
 from .feeds import KNOWN_FEEDS, STALE_AFTER_S, feed_dir_name
+from .playback import read_window
 from .uploader import retry_denials
 from .windows import SYDNEY_TZ, WINDOW, window_label
 
@@ -72,6 +73,10 @@ def _report(row: dict[str, str]) -> list | None:
     return [row["vehicle_id"], row["route_id"], ts, round(lon, 5), round(lat, 5), bearing, speed]
 
 
+def encode_window(start: int, feeds: dict[str, list[list]]) -> bytes:
+    return gzip.compress(json.dumps({"start": start, "feeds": feeds}, separators=(",", ":")).encode(), 5)
+
+
 class History:
     def __init__(
         self,
@@ -101,7 +106,10 @@ class History:
                 self._windows.move_to_end(start)
                 return cached[1]
         final = now >= start + WINDOW_S + FINAL_AFTER_S
-        body = self._build(start)
+        # A day built with build_playback.py is served from that local file.
+        body = read_window(self._data_dir, start)
+        if body is None:
+            body = encode_window(start, self.collect(start))
         with self._lock:
             self._windows[start] = (None if final else now + LIVE_TTL_S, body)
             self._windows.move_to_end(start)
@@ -109,13 +117,14 @@ class History:
                 self._windows.popitem(last=False)
         return body
 
-    def _build(self, start: int) -> bytes:
+    def collect(self, start: int) -> dict[str, list[list]]:
+        """Reports per feed in the window starting at *start*, from S3 and local recordings."""
         window = datetime.fromtimestamp(start, tz=SYDNEY_TZ)
         with ThreadPoolExecutor(max_workers=S3_WORKERS) as pool:
             results = pool.map(lambda feed: (feed, self._feed_reports(feed, window)), KNOWN_FEEDS)
             feeds = {feed: reports for feed, reports in results if reports}
         log.debug("history %s: %s", window_label(window), {f: len(r) for f, r in feeds.items()})
-        return gzip.compress(json.dumps({"start": start, "feeds": feeds}, separators=(",", ":")).encode(), 5)
+        return feeds
 
     def _feed_reports(self, feed: str, window: datetime) -> list[list]:
         """*feed*'s reports in *window* from S3 and local files, without repeats, by GPS time."""

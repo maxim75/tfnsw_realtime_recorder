@@ -141,6 +141,31 @@ and stops when it reaches the present.
   and pauses briefly while the next one loads. A busy window (all buses at
   evening peak) is about 1 MB to download; the server caches finished windows.
 - Periods the recorder wasn't running show "No recorded data at this time".
+
+#### Optimized local day files
+
+Reading windows from S3 on demand takes 1–4 s each. For fast playback, build a
+day's file once; the server then serves that day's windows from it (about
+15 ms each) and only falls back to S3 for windows the file doesn't have.
+
+```bash
+uv run build_playback.py --date 2026-10-16     # or --date yesterday / today
+```
+
+It downloads the day's recordings from S3 and writes
+`DATA_DIR/playback/<date>.sqlite` (one compressed block per 10-minute window,
+in the format the map loads; an evening of all buses is a few MB, a full day
+roughly 50–100 MB). Windows that may still change (the last ~25 minutes) are
+left out, so building `today` is safe and later windows keep coming from S3.
+Rebuilding replaces the file.
+
+On Coolify, run it inside the container, where `DATA_DIR` and the S3
+variables are already set, e.g. as a **Scheduled Task** each night after
+midnight Sydney time:
+
+```bash
+python -m recorder.playback --date yesterday
+```
 - Bus `vehicle_id`s include the trip, so a bus starting a new trip appears as a
   new vehicle.
 
