@@ -1,7 +1,8 @@
 # tfnsw-realtime-recorder
 
 Records **live vehicle positions** (GTFS-Realtime) of several cities (Sydney
-from Transport for NSW and Prague from PID/Golemio are configured) into
+from Transport for NSW, Prague from PID/Golemio and Kyiv from Kyivpastrans are
+configured) into
 10-minute gzipped CSV files per feed and uploads each finished file to
 S3-compatible storage (Hetzner Object Storage). One service records every
 configured city. A small web page shows each city's status and lets you switch
@@ -23,9 +24,9 @@ URLs, configured per city in `recorder/cities.toml` (see [Cities](#cities)).
 | `DATA_DIR` | no | default `/data` in Docker, `./data` with `main.py` |
 | `PORT` | no | default `8729` |
 
-Prague needs no API key. Each city's feeds and interval are set on the web
+Prague and Kyiv need no API key. Each city's feeds and interval are set on the web
 page and stored in `DATA_DIR/settings.json` (defaults come from `cities.toml`:
-10 Sydney-area feeds every 30 s; Prague's single feed every 30 s).
+10 Sydney-area feeds every 30 s; Prague's and Kyiv's single feed every 30 s).
 
 ## Cities
 
@@ -76,7 +77,7 @@ returning the protobuf). Add a section like the one above with at least
 
 **Where data goes.** In S3, each city has its own prefix: Sydney keeps the
 existing `vehiclepos/feed=…`, Prague uses `vehiclepos/city=prague/feed=…`
-(same layout below the prefix, see [Output](#output)). Locally, each city has
+and Kyiv `vehiclepos/city=kyiv/feed=…` (same layout below the prefix, see [Output](#output)). Locally, each city has
 its own folder, `DATA_DIR/<city>/{open,complete,playback}`. On the first start
 after upgrading from the single-city version, the old `DATA_DIR/open`,
 `complete` and `playback` folders are moved to `DATA_DIR/sydney/` automatically
@@ -111,6 +112,18 @@ newest GPS report is more than 10 minutes old (also logged as a warning).
 
 Prague has a single feed, `all` (every PID vehicle: buses, trams, metro, trains
 and ferries; line names and modes come from PID's static GTFS).
+
+Kyiv has a single feed, `all`: the trams, trolleybuses and buses of the
+municipal operator Kyivpastrans (about 170 vehicles at a time when this was
+written; private minibuses and the metro are not in the feed). Line names and
+modes come from the static GTFS on the
+[Kyiv open data portal](https://data.kyivcity.gov.ua/dataset/rozklad-rukhu-miskoho-elektrychnoho-ta-avtomobilnoho-transportu-dep-transport).
+Both URLs in `cities.toml` are the portal's links, which redirect to the
+operator's servers over plain HTTP. The operator notes that its GPS comes from
+the fare-payment equipment, so positions are coarser than in the other cities.
+The data is under the portal's Open Data Licence (free for personal and
+commercial use):
+<https://data.kyivcity.gov.ua/dataset/dani-pro-mistseznakhodzhennia-miskoho-elektrychnoho-ta-pasazhyrskoho-avtomobilnoho-tra-dep-transport>.
 
 ### Prague data licence
 
@@ -336,7 +349,7 @@ range.
 ## API limits
 
 - **Rate:** ~5 requests/second; the recorder spaces requests 0.2 s apart.
-These are TfNSW's limits and apply to Sydney; Prague has no daily quota
+These are TfNSW's limits and apply to Sydney; Prague and Kyiv have no daily quota
 configured (it is polled at most once per second).
 
 - **Daily quota:** 60,000 requests by default. Requests/day =

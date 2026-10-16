@@ -154,3 +154,21 @@ default_feeds = ["all"]
   id = "all"
   url = "https://api.golemio.cz/v2/vehiclepositions/gtfsrt/vehicle_positions.pb"
   mode = "bus"     # fallback when a route is not in routes.txt
+
+[kyiv]
+name = "Kyiv"
+timezone = "Europe/Kyiv"
+center = [30.52, 50.45]
+zoom = 11
+s3_prefix = "vehiclepos/city=kyiv"
+attribution = "Kyivpastrans / Kyiv City open data (Open Data Licence)"
+interval = 30
+max_requests_per_second = 1
+# Kyiv open data portal links; they redirect to the operator's servers
+static_gtfs = "https://data.kyivcity.gov.ua/dataset/rozklad-rukhu-miskoho-elektrychnoho-ta-avtomobilnoho-transportu-dep-transport/resource/58f0c3d0-9409-4de9-92c8-de4afa035efd/data/download"
+default_feeds = ["all"]
+
+  [[kyiv.feeds]]
+  id = "all"       # Kyivpastrans trams, trolleybuses and buses
+  url = "https://data.kyivcity.gov.ua/dataset/dani-pro-mistseznakhodzhennia-miskoho-elektrychnoho-ta-pasazhyrskoho-avtomobilnoho-tra-dep-transport/resource/1e0ced20-e242-4805-af55-d9afd37ab380/data/download"
+  mode = "bus"     # fallback when a route is not in routes.txt
