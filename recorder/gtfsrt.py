@@ -27,6 +27,16 @@ class FetchError(Exception):
     """A feed could not be fetched or decoded. Never contains header values."""
 
 
+def _timestamp(value: int) -> datetime | None:
+    """UTC time of a POSIX timestamp; None when unset or absurd (e.g. milliseconds)."""
+    if not value:
+        return None
+    try:
+        return datetime.fromtimestamp(value, tz=timezone.utc)
+    except (ValueError, OverflowError, OSError):
+        return None
+
+
 def _position(entity) -> Position | None:
     if not entity.HasField("vehicle"):
         return None
@@ -42,7 +52,7 @@ def _position(entity) -> Position | None:
         longitude=pos.longitude,
         bearing=pos.bearing if pos.HasField("bearing") else None,
         speed=pos.speed if pos.HasField("speed") else None,
-        timestamp=datetime.fromtimestamp(vp.timestamp, tz=timezone.utc) if vp.timestamp else None,
+        timestamp=_timestamp(vp.timestamp),
     )
 
 

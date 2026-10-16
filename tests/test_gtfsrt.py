@@ -126,3 +126,12 @@ def test_errors_do_not_leak_headers():
     with pytest.raises(FetchError) as ei:
         c.fetch("http://x", {"Authorization": "SECRETKEY"})
     assert "SECRETKEY" not in str(ei.value)
+
+
+def test_absurd_timestamp_only_loses_that_vehicles_time():
+    ok = {"id": "a", "lat": 1.0, "lon": 2.0, "ts": 1760000000}
+    ms = {"id": "b", "lat": 1.0, "lon": 2.0, "ts": 1760000000000}  # milliseconds
+    huge = {"id": "c", "lat": 1.0, "lon": 2.0, "ts": 2**63 - 1}
+    c, _ = client(FakeResponse(200, feed_bytes([ok, ms, huge])))
+    got = {p.vehicle_id: p.timestamp for p in c.fetch("http://x", {})}
+    assert got["a"] is not None and got["b"] is None and got["c"] is None
