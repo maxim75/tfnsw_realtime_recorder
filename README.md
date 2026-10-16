@@ -1,102 +1,100 @@
 # tfnsw-realtime-recorder
 
-Records Transport for NSW **live vehicle positions** (GTFS-Realtime) to CSV files
-for later analysis and visualisation, using
-[tfnsw_trip_planner](https://github.com/maxim75/tfnsw_trip_planner).
+Records Transport for NSW **live vehicle positions** (GTFS-Realtime) into
+10-minute gzipped CSV files per feed and uploads each finished file to
+S3-compatible storage (Hetzner Object Storage). A small web page shows the
+recorder's status and lets you switch feeds on/off and change the polling
+interval. Uses [tfnsw_trip_planner](https://github.com/maxim75/tfnsw_trip_planner).
 
-## Setup
+## Configuration
 
-You need a TfNSW Open Data API key with the **Public Transport – Realtime Vehicle
-Positions** product enabled. Put it in the environment or a `.env` file:
+| Variable | Required | Notes |
+|---|---|---|
+| `TFNSW_API_KEY` | yes | TfNSW Open Data key with *Realtime Vehicle Positions* enabled |
+| `ADMIN_USER`, `ADMIN_PASSWORD` | yes | basic-auth login for the web page |
+| `S3_BUCKET` | to upload | without it, finished files stay in `DATA_DIR/complete/` |
+| `S3_ACCESS_KEY_ID`, `S3_SECRET_ACCESS_KEY` | with `S3_BUCKET` | Hetzner Console → Security → S3 credentials |
+| `S3_ENDPOINT_URL` | for Hetzner | `https://nbg1.your-objectstorage.com` |
+| `S3_REGION` | no | derived from the Hetzner endpoint (`nbg1`) |
+| `S3_PREFIX` | no | default `vehiclepos` |
+| `DATA_DIR` | no | default `/data` in Docker, `./data` with `main.py` |
+| `PORT` | no | default `8000` |
 
-```
-TFNSW_API_KEY=your_key
-```
+Feeds and interval are set on the web page and stored in
+`DATA_DIR/settings.json` (default: 10 Sydney-area feeds every 30 s).
 
-## Usage
+## Run locally
+
+Put the variables in `.env`, then:
 
 ```bash
-uv run main.py                                   # the 10 default feeds every 30s until Ctrl+C
-uv run main.py -m buses -m sydneytrains -m ferries/sydneyferries
-uv run main.py -m metro -i 10 --duration 3600    # one hour, 10s polling
+uv run main.py
 ```
 
-Options: `-m/--mode` (repeatable; any `gtfs/vehiclepos/` feed path, default
-all feeds below), `-i/--interval` seconds (default 30), `-d/--duration`
-seconds, `-o/--out` directory.
+Open <http://127.0.0.1:8000> and log in with `ADMIN_USER` / `ADMIN_PASSWORD`.
 
-Default feeds (`FEEDS` in `main.py`):
+Tests:
 
-| feed | service |
-|---|---|
-| `buses` | Sydney metro buses |
-| `sydneytrains` | Sydney Trains |
-| `metro` | Sydney Metro |
-| `nswtrains` | NSW TrainLink |
-| `ferries/sydneyferries` | Sydney Ferries |
-| `ferries/MFF` | Manly Fast Ferry |
-| `lightrail/cbdandsoutheast` | Sydney light rail L2/L3 |
-| `lightrail/innerwest` | Inner West light rail L1 |
-| `lightrail/parramatta` | Parramatta light rail |
-| `regionbuses/sydneysurrounds` | Sydney Surrounds regional buses |
-
-Other feeds that answered on 2026-10-16 and can be added with `-m`:
-`lightrail/newcastle` and `regionbuses/` + `centralwestandorana`,
-`centralwestandorana2`, `farwest`, `newcastlehunter`, `newenglandnorthwest`,
-`northcoast`, `northcoast2`, `northcoast3`, `riverinamurray`, `riverinamurray2`,
-`southeasttablelands`, `southeasttablelands2`.
+```bash
+uv run pytest
+```
 
 ## Output
 
-One CSV per feed per day (Sydney time), appended to as the recorder runs:
+Each feed gets one file per 10-minute window (Sydney time), e.g. 12:10–12:20:
 
 ```
-data/buses/2026-10-16.csv
-data/sydneytrains/2026-10-16.csv
-data/ferries_sydneyferries/2026-10-16.csv
+vehiclepos/feed=buses/date=2026-10-16/buses_2026-10-16T12-10+1100.csv.gz
 ```
+
+The `+1100`/`+1000` offset keeps the repeated hour at the end of daylight
+saving unique. A window cut short by a restart, or a feed switched off and on
+again, continues in `..._p2.csv.gz`; existing objects are never overwritten.
 
 | column | notes |
 |---|---|
-| `fetched_at` | when the recorder polled (Sydney time, ISO 8601) |
+| `fetched_at` | when the recorder polled (Sydney time) |
 | `timestamp` | GPS report time from the vehicle |
-| `vehicle_id`, `trip_id`, `route_id` | GTFS identifiers (`route_id` is `<prefix>_<shortName>`, e.g. `2510_992`) |
+| `vehicle_id`, `trip_id`, `route_id` | GTFS identifiers |
 | `latitude`, `longitude` | WGS84 |
 | `bearing`, `speed` | degrees / m/s; empty when the feed doesn't provide them |
 
-A row is written only when a vehicle's `timestamp` changes, so polling faster
-than the feed refreshes doesn't create duplicates. Vehicles with no GPS fix
-(`0,0`) are skipped.
+A row is written only when a vehicle's GPS timestamp changes. Read with DuckDB:
 
-Load for analysis:
-
-```python
-import pandas as pd
-df = pd.read_csv("data/buses/2026-10-16.csv", parse_dates=["fetched_at", "timestamp"])
-track = df[df.vehicle_id == df.vehicle_id.iloc[0]].sort_values("timestamp")
+```sql
+SELECT * FROM read_csv('s3://<bucket>/vehiclepos/feed=buses/date=2026-10-16/*.csv.gz',
+                       hive_partitioning = true);
 ```
-
-## Feed characteristics (measured 2026-10-16, 11:22 AEDT)
-
-| feed | vehicles | report interval | lag behind real time | speed/bearing |
-|---|---|---|---|---|
-| buses | ~1,550 | ~15 s | ~12 s | yes |
-| sydneytrains (v2) | ~225 | ~40 s | ~25 s | no |
-| ferries/sydneyferries | ~20 | ~15 s | ~13 s | yes |
-
-Storage: buses at 15 s polling is ~0.9 MB/min, roughly **1.3 GB/day** of CSV
-(about 5× smaller gzipped); at the default 30 s it's roughly half that. The
-other feeds are much smaller.
 
 ## API limits
 
-Two TfNSW API key limits apply:
+- **Rate:** ~5 requests/second; the recorder spaces requests 0.2 s apart.
+- **Daily quota:** 60,000 requests by default. Requests/day =
+  `feeds × 86400 / interval`; the page shows the estimate and turns red above
+  the quota. 10 feeds at 30 s = 28,800/day.
 
-- **Rate:** ~5 requests/second. The recorder spaces requests 0.2 s apart; going
-  faster returns HTTP 429.
-- **Daily quota:** 60,000 requests by default. Requests per day =
-  `feeds × 86400 / interval`, so the 10 default feeds at 30 s use 28,800
-  requests/day. The recorder warns at startup if you'd go over the quota.
-  For finer detail on one feed, run it in its own process (e.g. `-m buses -i 15`,
-  5,760 requests/day) and the others with `-m ...` at a longer interval. Don't
-  let two processes record the same feed: each de-duplicates only its own rows.
+## Deploy to Coolify
+
+1. **New Resource → Public/Private Repository**, pick this repo, build pack
+   **Dockerfile**.
+2. **Ports exposed:** `8000`; set a domain for the web page.
+3. **Persistent storage:** add a volume mounted at `/data` (use a Docker
+   volume, not a host bind mount, so the image's `app` user can write to it).
+4. **Environment variables:** everything from the table above, e.g.
+
+   ```
+   TFNSW_API_KEY=...
+   ADMIN_USER=...
+   ADMIN_PASSWORD=...
+   S3_ENDPOINT_URL=https://nbg1.your-objectstorage.com
+   S3_BUCKET=...
+   S3_ACCESS_KEY_ID=...
+   S3_SECRET_ACCESS_KEY=...
+   ```
+
+5. **Health check:** path `/healthz`, port `8000` (the image also has a
+   Docker `HEALTHCHECK`).
+6. Set the container stop/grace timeout to **30 s** so the last partial
+   window is uploaded on redeploy (if it isn't, it's uploaded after the next
+   start).
+7. Run **one** instance only; two would record every feed twice.
