@@ -1,0 +1,9 @@
+[project]
+name = "tfnsw-realtime-recorder"
+version = "0.1.0"
+description = "Record TfNSW live vehicle positions (GTFS-Realtime) to CSV for later analysis"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "tfnsw-trip-planner[realtime]>=1.4.0",
+]
