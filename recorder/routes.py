@@ -154,6 +154,20 @@ class RouteInfo:
         log.info("loaded %d routes for %s", len(routes), self._city.id)
 
 
+def prepare_routes(city: City, data_dir: Path, *, session=None) -> RouteInfo:
+    """A RouteInfo with the mapping refreshed, for offline tools (exports) that run once.
+
+    Logs a WARNING when a city with a static feed still has no mapping, because
+    labels and modes then fall back to raw route ids.
+    """
+    routes = RouteInfo(city, data_dir, session=session)
+    if city.static_gtfs:
+        routes.refresh()
+        if not routes.modes():
+            log.warning("no route names for %s (static GTFS unavailable): labels will be raw route ids", city.id)
+    return routes
+
+
 class RouteRefresher:
     """Daemon thread that calls ``routes.refresh()`` at start and then every *interval* s.
 

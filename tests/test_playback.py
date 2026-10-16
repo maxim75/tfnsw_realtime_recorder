@@ -159,3 +159,28 @@ def test_prague_day_is_bounded_in_prague_time(tmp_path):
         db.execute("CREATE TABLE windows (start INTEGER PRIMARY KEY, reports INTEGER, body BLOB)")
         db.execute("INSERT INTO windows VALUES (?, 1, ?)", (w, b"x"))
     assert read_window(tmp_path, w, tz) == b"x"
+
+
+def test_main_labels_come_from_refreshed_routes(tmp_path, monkeypatch):
+    import recorder.config as config
+    import recorder.history as history
+    import recorder.uploader as uploader
+    from recorder.playback import main
+    from test_routes import FakeSession, _ok
+
+    session = FakeSession(_ok())
+    monkeypatch.setattr("recorder.routes.requests.get", session.get)
+    monkeypatch.setattr(config, "load_dotenv", lambda *a, **k: None)
+    for name, value in {"S3_BUCKET": "bucket", "S3_ACCESS_KEY_ID": "id", "S3_SECRET_ACCESS_KEY": "s"}.items():
+        monkeypatch.setenv(name, value)
+    monkeypatch.setattr(uploader, "make_s3_client", lambda s3: FakeS3({}))
+    seen = []
+
+    class Spy(history.History):
+        def __init__(self, *args, **kwargs):
+            seen.append(kwargs["routes"])
+            super().__init__(*args, **kwargs)
+
+    monkeypatch.setattr(history, "History", Spy)
+    main(["--city", "prague", "--date", "2026-10-16", "--data-dir", str(tmp_path)])
+    assert len(session.calls) == 1 and seen[0].label("L992") == "B"

@@ -108,6 +108,7 @@ def main(argv: list[str] | None = None) -> int:
     from .cities import load_cities
     from .config import ConfigError, S3Config, load_dotenv
     from .history import History
+    from .routes import prepare_routes
     from .storage import city_dir
     from .uploader import make_s3_client
 
@@ -133,7 +134,8 @@ def main(argv: list[str] | None = None) -> int:
     path = day_file(data_dir, day)
     started = time.monotonic()
     # data_dir is also read for recordings not uploaded yet (when run next to the recorder).
-    history = History(make_s3_client(s3), s3.bucket, city.s3_prefix, data_dir, city=city)
+    history = History(make_s3_client(s3), s3.bucket, city.s3_prefix, data_dir, city=city,
+                      routes=prepare_routes(city, data_dir))
     windows, reports = build_day(history, day, path)
     log.info("Wrote %d windows, %d reports, %.1f MB to %s in %.0f s",
              windows, reports, path.stat().st_size / 1e6, path, time.monotonic() - started)

@@ -253,3 +253,12 @@ def test_refresher_does_not_wait_for_the_first_interval():
     assert routes.reached.wait(5)
     refresher.stop(timeout=5)
     assert routes.calls == 1 and not refresher.alive
+
+
+def test_prepare_routes_refreshes_and_warns_when_mapping_stays_empty(prague, tmp_path, caplog):
+    from recorder.routes import prepare_routes
+
+    assert prepare_routes(prague, tmp_path / "a", session=FakeSession(_ok())).label("L992") == "B"
+    empty = prepare_routes(prague, tmp_path / "b", session=FakeSession(requests.ConnectionError("down")))
+    assert empty.label("L992") == "L992"
+    assert "raw route ids" in caplog.text
