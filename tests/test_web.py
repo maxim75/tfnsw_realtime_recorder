@@ -220,3 +220,29 @@ def test_live_stream_after_server_restart_resends_buffer(ctx):
     with client.stream("GET", "/api/live/stream", auth=AUTH, headers={"Last-Event-ID": "5000"}) as r:
         text = "".join(r.iter_text())
     assert "id: 1\n" in text and '"a"' in text
+
+
+def test_history_window_endpoint(ctx, tmp_path):
+    import gzip as _gzip
+
+    from recorder.history import History
+
+    client, comps = ctx
+    comps.history = History(None, None, "", tmp_path)
+    path = tmp_path / "complete" / "buses" / "buses_2026-10-16T18-00+1100.csv.gz"
+    path.parent.mkdir(parents=True)
+    path.write_bytes(_gzip.compress(
+        b"fetched_at,timestamp,vehicle_id,trip_id,route_id,latitude,longitude,bearing,speed\n"
+        b"2026-10-16T18:00:20+11:00,2026-10-16T18:00:10+11:00,a,t,2510_333,-33.8,151.2,90.0,5.0\n"
+    ))
+    start = 1792134000  # 2026-10-16 18:00 AEDT
+    r = client.get(f"/api/history/window?start={start}", auth=AUTH)
+    assert r.status_code == 200 and r.headers["content-encoding"] == "gzip"
+    assert r.json()["feeds"]["buses"][0][:3] == ["a", "2510_333", start + 10]
+    assert client.get(f"/api/history/window?start={start + 60}", auth=AUTH).status_code == 422
+
+
+def test_history_unavailable_without_component(ctx):
+    client, comps = ctx
+    comps.history = None
+    assert client.get("/api/history/window?start=1792134000", auth=AUTH).status_code == 503

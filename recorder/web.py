@@ -11,12 +11,13 @@ from pathlib import Path
 from typing import Any
 
 from fastapi import Body, Depends, FastAPI, Header, HTTPException, Request
-from fastapi.responses import FileResponse, PlainTextResponse, StreamingResponse
+from fastapi.responses import FileResponse, PlainTextResponse, Response, StreamingResponse
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from tfnsw_trip_planner import TripPlannerClient
 
 from .config import EnvConfig, SettingsStore
 from .feeds import DAILY_REQUEST_QUOTA, KNOWN_FEEDS, feed_version
+from .history import History
 from .live import LiveHub
 from .recorder import FeedStatus, Recorder
 from .uploader import Uploader, make_s3_client
@@ -37,6 +38,7 @@ class Components:
     recorder: Any
     uploader: Any
     live: LiveHub = field(default_factory=LiveHub)
+    history: History | None = None
 
 
 def build_components(env: EnvConfig) -> Components:
@@ -46,8 +48,9 @@ def build_components(env: EnvConfig) -> Components:
         log.info("Recovered %d unfinished files from a previous run", len(recovered))
     settings = SettingsStore(env.data_dir / "settings.json")
     s3 = env.s3
+    s3_client = make_s3_client(s3) if s3 else None
     uploader = Uploader(
-        make_s3_client(s3) if s3 else None,
+        s3_client,
         s3.bucket if s3 else None,
         s3.prefix if s3 else "",
         env.data_dir,
@@ -58,7 +61,8 @@ def build_components(env: EnvConfig) -> Components:
         TripPlannerClient(api_key=env.tfnsw_api_key, timeout=8), settings, env.data_dir, uploader.enqueue,
         on_positions=live.publish,
     )
-    return Components(env=env, settings=settings, recorder=recorder, uploader=uploader, live=live)
+    history = History(s3_client, s3.bucket if s3 else None, s3.prefix if s3 else "", env.data_dir)
+    return Components(env=env, settings=settings, recorder=recorder, uploader=uploader, live=live, history=history)
 
 
 def create_app(env: EnvConfig | None = None, components: Components | None = None) -> FastAPI:
@@ -112,6 +116,21 @@ def create_app(env: EnvConfig | None = None, components: Components | None = Non
     @app.get("/api/live", dependencies=[Depends(require_auth)])
     def live_snapshot() -> dict:
         return comps.live.snapshot()
+
+    @app.get("/api/history/window", dependencies=[Depends(require_auth)])
+    def history_window(start: int) -> Response:
+        """Recorded reports of the 10-minute window starting at *start* (epoch s), gzip JSON."""
+        if comps.history is None:
+            raise HTTPException(503, "Playback is not available")
+        try:
+            body = comps.history.window(start)
+        except ValueError as exc:
+            raise HTTPException(422, str(exc)) from exc
+        except Exception as exc:
+            log.exception("Reading recorded window %s failed", start)
+            raise HTTPException(502, "Could not read recorded data") from exc
+        return Response(body, media_type="application/json",
+                        headers={"Content-Encoding": "gzip", "Cache-Control": "no-store"})
 
     @app.get("/api/live/stream", dependencies=[Depends(require_auth)])
     async def live_stream(

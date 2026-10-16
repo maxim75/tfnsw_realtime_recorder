@@ -126,6 +126,24 @@ vehicles.
 - A vehicle disappears 2.5 minutes after its last report (end of trip, out of
   service). Only enabled feeds appear on the map.
 
+### Playback
+
+The **Playback** tab replays recorded data on the same map: pick a date and
+time (Sydney time), drag the time slider across the day, and play or pause
+(space bar) at 1× to 120×. It opens 30 minutes in the past, playing at 10×,
+and stops when it reaches the present.
+
+- Recorded data is served one 10-minute window at a time from
+  `/api/history/window?start=<epoch>`: the window's S3 objects plus any local
+  files for it that aren't uploaded yet, so playback reaches right up to the
+  last minute. Without S3, playback uses the local files only.
+- The page loads windows ahead of the playback time (more at higher speeds)
+  and pauses briefly while the next one loads. A busy window (all buses at
+  evening peak) is about 1 MB to download; the server caches finished windows.
+- Periods the recorder wasn't running show "No recorded data at this time".
+- Bus `vehicle_id`s include the trip, so a bus starting a new trip appears as a
+  new vehicle.
+
 ## Map in kepler.gl
 
 `export_csv.py` downloads the recorded files for a date and time range from

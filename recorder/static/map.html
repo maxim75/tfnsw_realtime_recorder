@@ -8,29 +8,57 @@
 <script src="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.js"></script>
 <script src="https://unpkg.com/deck.gl@9.1.14/dist.min.js"></script>
 <style>
-  :root { --fg:#1d1d1f; --muted:#6e6e73; --panel:rgba(255,255,255,.94); --line:#e5e5ea; --ok:#1a7f37; --bad:#c62828; }
-  @media (prefers-color-scheme: dark) { :root { --fg:#f2f2f7; --muted:#a1a1a6; --panel:rgba(28,28,30,.94); --line:#3a3a3c; --ok:#3fb950; --bad:#ff6b6b; } }
+  :root { --fg:#1d1d1f; --muted:#6e6e73; --panel:rgba(255,255,255,.94); --line:#e5e5ea; --ok:#1a7f37; --bad:#c62828; --accent:#0a58ca; }
+  @media (prefers-color-scheme: dark) { :root { --fg:#f2f2f7; --muted:#a1a1a6; --panel:rgba(28,28,30,.94); --line:#3a3a3c; --ok:#3fb950; --bad:#ff6b6b; --accent:#6ea8fe; } }
   html, body, #map { margin:0; height:100%; }
   body { font:13px/1.4 system-ui, sans-serif; color:var(--fg); background:#e9e9e9; }
-  #panel { position:absolute; top:12px; left:12px; z-index:2; width:270px; max-width:calc(100vw - 48px);
+  #panel { position:absolute; top:12px; left:12px; z-index:2; width:290px; max-width:calc(100vw - 48px);
            background:var(--panel); border:1px solid var(--line); border-radius:10px; padding:12px; box-shadow:0 2px 12px rgba(0,0,0,.12); }
-  #panel h1 { font-size:15px; margin:0 0 4px; }
+  #panel h1 { font-size:15px; margin:0 0 6px; }
   #panel a { color:inherit; }
   .muted { color:var(--muted); } .ok { color:var(--ok); } .bad { color:var(--bad); }
   .row { margin-top:8px; }
   .feeds { display:grid; grid-template-columns:1fr 1fr; gap:2px 8px; }
   label { white-space:nowrap; }
   input[type=text] { width:100%; box-sizing:border-box; padding:4px 6px; }
-  select { padding:2px; }
+  select, input[type=date], input[type=time] { padding:2px; font:inherit; }
   details summary { cursor:pointer; }
+  .tabs { display:flex; border:1px solid var(--line); border-radius:6px; overflow:hidden; }
+  .tabs button { flex:1; border:0; padding:5px; background:transparent; color:inherit; font:inherit; cursor:pointer; }
+  .tabs button.on { background:var(--accent); color:#fff; }
+  #clock { font-size:20px; font-variant-numeric:tabular-nums; font-weight:600; }
+  #slider { width:100%; }
+  .controls { display:flex; gap:6px; align-items:center; flex-wrap:wrap; }
+  #playBtn { min-width:44px; font-size:15px; padding:2px 8px; }
   @media (max-width:500px) { #panel { width:auto; right:12px; } }
 </style>
 </head>
 <body>
 <div id="map"></div>
 <div id="panel">
-  <h1>Live vehicles</h1>
-  <div id="state" class="muted">Loading…</div>
+  <h1>Vehicles</h1>
+  <div class="tabs"><button id="tabLive" class="on">Live</button><button id="tabPlay">Playback</button></div>
+  <div id="state" class="row muted">Loading…</div>
+
+  <div id="liveCtl" class="row">
+    Delay <select id="delay"><option>30</option><option selected>60</option><option>90</option><option>120</option></select> s
+    <span class="muted" title="Vehicles are drawn this far in the past, between reports already received, so they move smoothly">ⓘ</span>
+  </div>
+
+  <div id="playCtl" hidden>
+    <div class="row" id="clock">—</div>
+    <div class="row"><input id="slider" type="range" min="0" max="86399" step="10" value="0" aria-label="Time of day"></div>
+    <div class="row controls">
+      <button id="playBtn" title="Play / pause (space)">▶</button>
+      <select id="speed" aria-label="Playback speed">
+        <option value="1">1×</option><option value="2">2×</option><option value="5">5×</option>
+        <option value="10" selected>10×</option><option value="30">30×</option><option value="60">60×</option><option value="120">120×</option>
+      </select>
+      <input id="date" type="date" aria-label="Date">
+      <input id="time" type="time" step="60" aria-label="Time">
+    </div>
+  </div>
+
   <details open>
     <summary class="row muted">Options</summary>
     <div class="row feeds" id="feeds"></div>
@@ -39,15 +67,12 @@
       Colour <select id="colour"><option value="route">by route</option><option value="speed">by speed</option><option value="mode">by mode</option></select>
       <label><input id="trails" type="checkbox" checked> Trails</label>
     </div>
-    <div class="row">
-      Delay <select id="delay"><option>30</option><option selected>60</option><option>90</option><option>120</option></select> s
-      <span class="muted" title="Vehicles are drawn this far in the past, between reports already received, so they move smoothly">ⓘ</span>
-    </div>
     <div class="row muted"><a href="/">Recorder status</a></div>
   </details>
 </div>
 <script>
 const api = (path) => new URL(path, location.origin);  // origin never carries user:pass@
+const $ = (id) => document.getElementById(id);
 const GROUPS = [
   ["buses", "Buses", (f) => f === "buses", true],
   ["sydneytrains", "Trains", (f) => f === "sydneytrains", false],
@@ -60,25 +85,38 @@ const GROUPS = [
 const MODE_COLOURS = { buses: [0, 112, 210], sydneytrains: [242, 133, 0], metro: [22, 128, 128], nswtrains: [217, 75, 35],
                        ferries: [0, 150, 70], lightrail: [196, 30, 58], regionbuses: [120, 80, 180] };
 // HIDE_AFTER_S: a vehicle with no report for this long (trip ended, out of service) is no longer drawn.
-const HISTORY = 8, FORGET_S = 600, HIDE_AFTER_S = 150, MAX_GAP_S = 180, TRAIL_S = 90;
-
-const vehicles = new Map();  // "feed|vehicle" -> {feed, group, vid, route, label, reports: [[ts, lon, lat, bearing, speed]]}
-let lastBatchAt = 0, tripsVersion = 0;
-const base = Math.floor(Date.now() / 1000) - 3600;  // keeps TripsLayer timestamps small (float32)
+// APPEAR_BEFORE_S: a vehicle is drawn from this long before its first known report.
+const LIVE_HISTORY = 8, FORGET_S = 600, HIDE_AFTER_S = 150, APPEAR_BEFORE_S = 30, MAX_GAP_S = 180, TRAIL_S = 90;
+const WINDOW_S = 600, KEEP_BEHIND_S = 1800;  // playback: 10-minute windows; keep 30 min of history loaded
 
 const groupOf = (feed) => (GROUPS.find(([, , match]) => match(feed)) || ["buses"])[0];
 const shortRoute = (route) => route.includes("_") ? route.slice(route.lastIndexOf("_") + 1) : route;
 
-function addReport(feed, r) {
+// A store holds vehicles: "feed|vehicle" -> {feed, group, vid, route, label, reports: [[ts, lon, lat, bearing, speed]] sorted by ts}
+const live = { vehicles: new Map(), version: 0, lastBatchAt: 0 };
+const play = { vehicles: new Map(), version: 0, windows: new Map(), t: 0, playing: false, base: 0 };
+let mode = "live";
+
+function addReport(store, feed, r, maxHistory) {
   const [vid, route, ts, lon, lat, bearing, speed] = r;
   const key = feed + "|" + vid;
-  let v = vehicles.get(key);
-  if (!v) vehicles.set(key, v = { feed, group: groupOf(feed), vid, route, label: shortRoute(route), reports: [] });
-  const last = v.reports[v.reports.length - 1];
-  if (last && ts <= last[0]) return;
-  v.route = route; v.label = shortRoute(route);
-  v.reports.push([ts, lon, lat, bearing, speed]);
-  if (v.reports.length > HISTORY) v.reports.shift();
+  let v = store.vehicles.get(key);
+  if (!v) store.vehicles.set(key, v = { feed, group: groupOf(feed), vid, route, label: shortRoute(route), reports: [] });
+  const rs = v.reports, rep = [ts, lon, lat, bearing, speed];
+  if (!rs.length || ts > rs[rs.length - 1][0]) {
+    rs.push(rep);
+    v.route = route; v.label = shortRoute(route);
+  } else {  // playback windows can arrive in any order
+    const i = lowerBound(rs, ts);
+    if (rs[i] && rs[i][0] === ts) return;
+    rs.splice(i, 0, rep);
+  }
+  if (maxHistory && rs.length > maxHistory) rs.shift();
+}
+function lowerBound(rs, t) {  // first index with ts >= t
+  let lo = 0, hi = rs.length;
+  while (lo < hi) { const mid = (lo + hi) >> 1; if (rs[mid][0] < t) lo = mid + 1; else hi = mid; }
+  return lo;
 }
 
 // --- colours ---------------------------------------------------------------
@@ -96,9 +134,9 @@ function speedColour(mps) {
   return [Math.round(220 * (1 - t) + 30 * t), Math.round(50 * (1 - t) + 160 * t), 60];
 }
 const routeColours = new Map();
-function colourFor(v, mode, speed) {
-  if (mode === "speed") return speedColour(speed);
-  if (mode === "mode") return MODE_COLOURS[v.group];
+function colourFor(v, by, speed) {
+  if (by === "speed") return speedColour(speed);
+  if (by === "mode") return MODE_COLOURS[v.group];
   if (!routeColours.has(v.route)) routeColours.set(v.route, hashColour(v.route));
   return routeColours.get(v.route);
 }
@@ -113,23 +151,44 @@ function headingDeg(lon0, lat0, lon1, lat1) {
 const metres = (lon0, lat0, lon1, lat1) =>
   Math.hypot((lon1 - lon0) * 111320 * Math.cos(lat0 * toRad), (lat1 - lat0) * 110540);
 
-/** Position of vehicle *v* at time *t*: between its two reports around t, else held at the nearest one. */
+/** [lon, lat, heading, speed, lastReportTs] of vehicle *v* at time *t*, or null when it isn't on the road then. */
 function positionAt(v, t) {
   const rs = v.reports;
-  if (t <= rs[0][0]) return [rs[0][1], rs[0][2], rs[0][3], rs[0][4]];
-  for (let i = rs.length - 1; i >= 0; i--) {
-    if (rs[i][0] > t) continue;
-    const a = rs[i], b = rs[i + 1];
-    if (!b || b[0] - a[0] > MAX_GAP_S) return [a[1], a[2], a[3], a[4]];
-    const f = (t - a[0]) / (b[0] - a[0]);
-    const moved = metres(a[1], a[2], b[1], b[2]) > 5;
-    return [a[1] + (b[1] - a[1]) * f, a[2] + (b[2] - a[2]) * f,
-            moved ? headingDeg(a[1], a[2], b[1], b[2]) : (b[3] ?? a[3]), b[4]];
-  }
+  if (!rs.length || t < rs[0][0] - APPEAR_BEFORE_S) return null;
+  const i = lowerBound(rs, t + 1e-6) - 1;  // last report at or before t
+  if (i < 0) return [rs[0][1], rs[0][2], rs[0][3], rs[0][4], rs[0][0]];
+  const a = rs[i], b = rs[i + 1];
+  if (t - a[0] > HIDE_AFTER_S && (!b || b[0] - a[0] > MAX_GAP_S)) return null;
+  if (!b || b[0] - a[0] > MAX_GAP_S) return [a[1], a[2], a[3], a[4], a[0]];
+  const f = (t - a[0]) / (b[0] - a[0]);
+  const moved = metres(a[1], a[2], b[1], b[2]) > 5;
+  return [a[1] + (b[1] - a[1]) * f, a[2] + (b[2] - a[2]) * f,
+          moved ? headingDeg(a[1], a[2], b[1], b[2]) : (b[3] ?? a[3]), b[4], a[0]];
 }
 
+// --- Sydney time helpers ---------------------------------------------------------
+const SYD = "Australia/Sydney";
+const partsFmt = new Intl.DateTimeFormat("en-AU", { timeZone: SYD, hourCycle: "h23",
+  year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", second: "2-digit" });
+function sydParts(epoch) {
+  const p = Object.fromEntries(partsFmt.formatToParts(new Date(epoch * 1000)).map((x) => [x.type, x.value]));
+  return { date: `${p.year}-${p.month}-${p.day}`, h: +p.hour, mi: +p.minute, s: +p.second };
+}
+/** Epoch of Sydney-local *date* (YYYY-MM-DD) plus *secs* since midnight. */
+function sydEpoch(date, secs) {
+  const [y, m, d] = date.split("-").map(Number);
+  const want = Date.UTC(y, m - 1, d) / 1000 + secs;
+  let t = want - 11 * 3600;
+  for (let k = 0; k < 3; k++) {  // correct for the UTC offset on that day (DST)
+    const p = sydParts(t), [py, pm, pd] = p.date.split("-").map(Number);
+    t += want - (Date.UTC(py, pm - 1, pd) / 1000 + p.h * 3600 + p.mi * 60 + p.s);
+  }
+  return t;
+}
+const clockFmt = new Intl.DateTimeFormat("en-AU", { timeZone: SYD, weekday: "short", day: "numeric", month: "short",
+  hour: "2-digit", minute: "2-digit", second: "2-digit", hourCycle: "h23" });
+
 // --- filters -----------------------------------------------------------------
-const $ = (id) => document.getElementById(id);
 $("feeds").innerHTML = GROUPS.map(([g, name, , on]) =>
   `<label><input type="checkbox" value="${g}" ${on ? "checked" : ""}> ${name}</label>`).join("");
 let enabledGroups, routeFilter;
@@ -137,9 +196,9 @@ function readFilters() {
   enabledGroups = new Set([...document.querySelectorAll("#feeds input:checked")].map((i) => i.value));
   const routes = $("routes").value.split(/[\s,]+/).filter(Boolean).map((s) => s.toUpperCase());
   routeFilter = routes.length ? new Set(routes) : null;
-  tripsVersion++;
+  live.version++; play.version++;
 }
-document.querySelectorAll("#panel input, #panel select").forEach((el) => el.addEventListener("input", readFilters));
+document.querySelectorAll("#feeds input, #routes").forEach((el) => el.addEventListener("input", readFilters));
 readFilters();
 const visible = (v) => enabledGroups.has(v.group) && (!routeFilter || routeFilter.has(v.label.toUpperCase()) || routeFilter.has(v.route.toUpperCase()));
 
@@ -159,50 +218,51 @@ const ARROW = {
     '<path d="M32 4 L54 56 L32 44 L10 56 Z" fill="#fff"/></svg>'),
   width: 64, height: 64, anchorY: 32, mask: true,
 };
+const timeOfDay = (ts) => new Date(ts * 1000).toLocaleTimeString("en-AU", { timeZone: SYD, hour12: false });
 
 const overlay = new deck.MapboxOverlay({
   interleaved: true,
   getTooltip: ({ object: d }) => d && {
     html: `<b>${d.v.group === "buses" ? "Route" : ""} ${d.v.label || "—"}</b> <span style="opacity:.7">${d.v.feed}</span><br>` +
-          `Vehicle ${d.v.vid}<br>${d.speed == null ? "" : `${Math.round(d.speed * 3.6)} km/h · `}` +
-          `report ${new Date(d.ts * 1000).toLocaleTimeString("en-AU", { timeZone: "Australia/Sydney", hour12: false })}`,
+          `Vehicle ${d.v.vid}<br>${d.speed == null ? "" : `${Math.round(d.speed * 3.6)} km/h · `}report ${timeOfDay(d.ts)}`,
     style: { fontSize: "12px", padding: "6px 8px" },
   },
 });
 map.addControl(overlay);
 
-let trips = [];
-function buildTrips() {
-  trips = [];
-  for (const v of vehicles.values()) {
-    if (v.reports.length < 2 || !visible(v)) continue;
-    trips.push({ v, path: v.reports.map((r) => [r[1], r[2]]), times: v.reports.map((r) => r[0] - base) });
+// Trails: built when a store's data or the filters change, not every frame.
+const trails = { store: null, version: -1, base: 0, data: [] };
+function trailsFor(store, base) {
+  if (trails.store !== store || trails.version !== store.version || trails.base !== base) {
+    trails.data = [];
+    for (const v of store.vehicles.values()) {
+      if (v.reports.length < 2 || !visible(v)) continue;
+      trails.data.push({ v, path: v.reports.map((r) => [r[1], r[2]]), times: v.reports.map((r) => r[0] - base) });
+    }
+    Object.assign(trails, { store, version: store.version, base });
   }
+  return trails.data;
 }
 
-function frame() {
-  const delay = Number($("delay").value);
-  const t = Date.now() / 1000 - delay;
-  const mode = $("colour").value, zoom = map.getZoom();
+function render(store, t, base) {
+  const by = $("colour").value, zoom = map.getZoom();
   const points = [];
-  for (const v of vehicles.values()) {
+  for (const v of store.vehicles.values()) {
     if (!visible(v)) continue;
-    const last = v.reports[v.reports.length - 1];
-    if (t - last[0] > HIDE_AFTER_S) continue;
-    const [lon, lat, angle, speed] = positionAt(v, t);
-    points.push({ v, position: [lon, lat], angle: angle ?? 0, speed, ts: last[0], colour: colourFor(v, mode, speed) });
+    const p = positionAt(v, t);
+    if (!p) continue;
+    points.push({ v, position: [p[0], p[1]], angle: p[2] ?? 0, speed: p[3], ts: p[4], colour: colourFor(v, by, p[3]) });
   }
-  if (tripsVersion !== frame.builtVersion) { buildTrips(); frame.builtVersion = tripsVersion; }
   const arrows = zoom >= 13.5;
   overlay.setProps({
     layers: [
       new deck.TripsLayer({
-        id: "trails", data: trips, visible: $("trails").checked,
+        id: "trails", data: trailsFor(store, base), visible: $("trails").checked,
         getPath: (d) => d.path, getTimestamps: (d) => d.times,
-        getColor: (d) => colourFor(d.v, mode === "speed" ? "route" : mode),
+        getColor: (d) => colourFor(d.v, by === "speed" ? "route" : by),
         currentTime: t - base, trailLength: TRAIL_S, fadeTrail: true,
         widthUnits: "pixels", getWidth: 3, opacity: 0.45, capRounded: true, jointRounded: true,
-        updateTriggers: { getColor: [mode, tripsVersion] },
+        updateTriggers: { getColor: [by] },
       }),
       new deck.ScatterplotLayer({
         id: "dots", data: points, visible: !arrows, pickable: true,
@@ -224,32 +284,172 @@ function frame() {
       }),
     ],
   });
-  const age = lastBatchAt ? Math.round((Date.now() - lastBatchAt) / 1000) : null;
-  $("state").innerHTML = `<span class="${age != null && age < 90 ? "ok" : "bad"}">●</span> ${points.length.toLocaleString()} vehicles` +
-    ` <span class="muted">· update ${age == null ? "—" : age + " s ago"}</span>`;
-  requestAnimationFrame(frame);
+  return points.length;
 }
 
-// --- data --------------------------------------------------------------------
-async function start() {
+// --- live ----------------------------------------------------------------------
+const liveBase = Math.floor(Date.now() / 1000) - 3600;  // keeps TripsLayer timestamps small (float32)
+async function startLive() {
   const r = await fetch(api("/api/live"));
   if (!r.ok) { $("state").textContent = `Error ${r.status} loading positions`; return; }
   const snap = await r.json();
-  for (const [feed, reports] of Object.entries(snap.feeds)) for (const rep of reports) addReport(feed, rep);
-  lastBatchAt = Date.now(); tripsVersion++;
+  for (const [feed, reports] of Object.entries(snap.feeds)) for (const rep of reports) addReport(live, feed, rep, LIVE_HISTORY);
+  live.lastBatchAt = Date.now(); live.version++;
   const es = new EventSource(api(`/api/live/stream?since=${snap.seq}`));
   es.onmessage = (e) => {
     const batch = JSON.parse(e.data);
-    for (const rep of batch.reports) addReport(batch.feed, rep);
-    lastBatchAt = Date.now(); tripsVersion++;
+    for (const rep of batch.reports) addReport(live, batch.feed, rep, LIVE_HISTORY);
+    live.lastBatchAt = Date.now(); live.version++;
   };
   setInterval(() => {  // forget vehicles that stopped reporting
     const cutoff = Date.now() / 1000 - FORGET_S - 300;
-    for (const [k, v] of vehicles) if (v.reports[v.reports.length - 1][0] < cutoff) vehicles.delete(k);
+    for (const [k, v] of live.vehicles) if (v.reports[v.reports.length - 1][0] < cutoff) live.vehicles.delete(k);
   }, 30000);
+}
+
+// --- playback ------------------------------------------------------------------
+const windowOf = (t) => Math.floor(t / WINDOW_S) * WINDOW_S;
+const latestPlayable = () => Date.now() / 1000 - 60;  // the newest reports are still arriving
+const lookahead = () => Math.max(WINDOW_S, Number($("speed").value) * 45);
+let inFlight = 0;
+
+function neededWindows() {
+  const first = windowOf(play.t) - WINDOW_S, last = Math.min(windowOf(play.t + lookahead()), windowOf(latestPlayable()));
+  const out = [];
+  for (let w = first; w <= last; w += WINDOW_S) out.push(w);
+  return out.sort((a, b) => Math.abs(a - play.t) - Math.abs(b - play.t));  // nearest first
+}
+function ensureWindows() {
+  for (const w of neededWindows()) {
+    if (inFlight >= 2) return;
+    const s = play.windows.get(w);
+    if (s && (s.state !== "error" || Date.now() - s.at < 15000)) continue;
+    loadWindow(w);
+  }
+}
+async function loadWindow(w) {
+  play.windows.set(w, { state: "loading" });
+  inFlight++;
+  try {
+    const r = await fetch(api(`/api/history/window?start=${w}`));
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    const body = await r.json();
+    if (!play.windows.has(w)) return;  // pruned while loading
+    let n = 0;
+    for (const [feed, reports] of Object.entries(body.feeds)) for (const rep of reports) { addReport(play, feed, rep); n++; }
+    // Windows that may still grow (the last ~15 min) are fetched again later.
+    const settled = w + WINDOW_S + 900 < Date.now() / 1000;
+    play.windows.set(w, { state: n ? "loaded" : "empty", at: Date.now(), settled });
+    play.version++;
+  } catch (e) {
+    play.windows.set(w, { state: "error", at: Date.now(), error: String(e) });
+  } finally {
+    inFlight--;
+  }
+}
+function pruneWindows() {
+  const lo = play.t - KEEP_BEHIND_S, hi = play.t + lookahead() + WINDOW_S * 2;
+  for (const [w, s] of play.windows) {
+    if (w + WINDOW_S < lo || w > hi) play.windows.delete(w);
+    else if (!s.settled && s.state !== "loading" && Date.now() - s.at > 30000) play.windows.delete(w);  // refetch
+  }
+  for (const [k, v] of play.vehicles) {
+    v.reports = v.reports.filter((r) => r[0] >= lo - 300 && r[0] <= hi + 300);
+    if (!v.reports.length) play.vehicles.delete(k);
+  }
+  play.version++;
+}
+const ready = (w) => { const s = play.windows.get(w); return s && s.state !== "loading"; };
+
+function seek(t, { keepData = false } = {}) {
+  play.t = Math.min(t, latestPlayable());
+  if (!keepData && (play.vehicles.size && Math.abs(play.t - (play.lastSeek ?? play.t)) > KEEP_BEHIND_S)) {
+    play.vehicles.clear(); play.windows.clear();
+  }
+  play.lastSeek = play.t;
+  play.base = windowOf(play.t) - 3600;
+  syncPlayInputs(true);
+  ensureWindows();
+  play.version++;
+}
+function syncPlayInputs(all) {
+  const p = sydParts(play.t);
+  $("clock").textContent = clockFmt.format(new Date(play.t * 1000));
+  if (document.activeElement !== $("slider")) $("slider").value = p.h * 3600 + p.mi * 60 + p.s;
+  if (all || $("date").value !== p.date) $("date").value = p.date;
+  const hhmm = `${String(p.h).padStart(2, "0")}:${String(p.mi).padStart(2, "0")}`;
+  if (document.activeElement !== $("time") && $("time").value !== hhmm) $("time").value = hhmm;
+}
+function setPlaying(on) {
+  play.playing = on;
+  $("playBtn").textContent = on ? "⏸" : "▶";
+}
+
+$("playBtn").addEventListener("click", () => {
+  if (!play.playing && play.t >= latestPlayable() - 1) return;  // at the present already
+  setPlaying(!play.playing);
+});
+$("slider").addEventListener("input", () => seek(sydEpoch($("date").value, Number($("slider").value))));
+$("date").addEventListener("change", () => $("date").value && seek(sydEpoch($("date").value, Number($("slider").value))));
+$("time").addEventListener("change", () => {
+  if (!$("time").value) return;
+  const [h, m] = $("time").value.split(":").map(Number);
+  seek(sydEpoch($("date").value, h * 3600 + m * 60));
+});
+$("speed").addEventListener("change", ensureWindows);
+document.addEventListener("keydown", (e) => {
+  if (mode === "play" && e.code === "Space" && !["INPUT", "SELECT", "BUTTON"].includes(document.activeElement.tagName)) {
+    e.preventDefault(); $("playBtn").click();
+  }
+});
+
+function setMode(m) {
+  mode = m;
+  $("tabLive").classList.toggle("on", m === "live");
+  $("tabPlay").classList.toggle("on", m === "play");
+  $("liveCtl").hidden = m !== "live";
+  $("playCtl").hidden = m !== "play";
+  if (m === "play" && !play.t) { seek(Date.now() / 1000 - 1800); setPlaying(true); }
+  if (m !== "play") setPlaying(false);
+}
+$("tabLive").addEventListener("click", () => setMode("live"));
+$("tabPlay").addEventListener("click", () => setMode("play"));
+setInterval(() => { if (mode === "play") pruneWindows(); }, 5000);
+
+// --- frame loop ------------------------------------------------------------------
+let lastFrame = performance.now();
+function frame(now) {
+  const dt = Math.min(0.25, (now - lastFrame) / 1000);  // cap after a background tab
+  lastFrame = now;
+  if (mode === "live") {
+    const n = render(live, Date.now() / 1000 - Number($("delay").value), liveBase);
+    const age = live.lastBatchAt ? Math.round((Date.now() - live.lastBatchAt) / 1000) : null;
+    $("state").innerHTML = `<span class="${age != null && age < 90 ? "ok" : "bad"}">●</span> ${n.toLocaleString()} vehicles` +
+      ` <span class="muted">· update ${age == null ? "—" : age + " s ago"}</span>`;
+  } else {
+    ensureWindows();
+    const w = windowOf(play.t);
+    const buffering = !ready(w) || !ready(w - WINDOW_S);
+    if (play.playing && !buffering) {
+      play.t += dt * Number($("speed").value);
+      if (windowOf(play.t) !== w) play.base = windowOf(play.t) - 3600;
+      if (play.t >= latestPlayable()) { play.t = latestPlayable(); setPlaying(false); }
+      syncPlayInputs(false);
+    }
+    const n = render(play, play.t, play.base);
+    const cur = play.windows.get(w);
+    let msg;
+    if (buffering) msg = `<span class="muted">Loading ${timeOfDay(w).slice(0, 5)}…</span>`;
+    else if (cur && cur.state === "error") msg = `<span class="bad">Could not load ${timeOfDay(w).slice(0, 5)} (${cur.error})</span>`;
+    else if (!n && cur && cur.state === "empty") msg = `<span class="muted">No recorded data at this time</span>`;
+    else msg = `${n.toLocaleString()} vehicles`;
+    if (play.t >= latestPlayable() - 1 && !play.playing) msg += ` <span class="muted">· reached the present</span>`;
+    $("state").innerHTML = msg;
+  }
   requestAnimationFrame(frame);
 }
-map.on("load", start);
+
+map.on("load", () => { startLive(); requestAnimationFrame(frame); });
 </script>
 </body>
 </html>
