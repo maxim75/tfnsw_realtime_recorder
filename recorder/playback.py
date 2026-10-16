@@ -30,6 +30,7 @@ WINDOW_S = int(WINDOW.total_seconds())
 
 
 def day_file(data_dir: Path, day: date) -> Path:
+    """The day file under *data_dir*, a city's folder (``DATA_DIR/<city>``)."""
     return data_dir / "playback" / f"{day.isoformat()}.sqlite"
 
 

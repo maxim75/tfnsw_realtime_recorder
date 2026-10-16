@@ -130,3 +130,32 @@ def test_main_builds_into_the_city_folder(tmp_path, monkeypatch):
     assert read_window(tmp_path / "sydney", W1800) is not None
     assert main(["--city", "prague", "--date", "2026-10-16", "--data-dir", str(tmp_path)]) == 0
     assert (tmp_path / "prague" / "playback" / "2026-10-16.sqlite").is_file()
+
+
+def test_day_files_live_in_each_citys_folder(tmp_path):
+    cities = load_cities(env={})
+    sydney, prague = tmp_path / "sydney", tmp_path / "prague"
+    assert day_file(sydney, DAY) == tmp_path / "sydney" / "playback" / "2026-10-16.sqlite"
+    build_day(History(fixture_s3(), "bucket", "vehiclepos", sydney), DAY, day_file(sydney, DAY))
+    assert read_window(sydney, W1800) is not None
+    assert read_window(prague, W1800) is None  # other city's folder has no day file
+    assert cities["prague"].timezone.key == "Europe/Prague"
+
+
+def test_prague_day_is_bounded_in_prague_time(tmp_path):
+    from zoneinfo import ZoneInfo
+
+    from recorder.playback import day_windows
+
+    tz = ZoneInfo("Europe/Prague")
+    starts = day_windows(date(2026, 10, 16), tz)
+    assert datetime.fromtimestamp(starts[0], tz=tz).strftime("%Y-%m-%d %H:%M") == "2026-10-16 00:00"
+    assert datetime.fromtimestamp(starts[-1], tz=tz).strftime("%H:%M") == "23:50"
+    w = int(datetime(2026, 10, 16, 18, 0, tzinfo=tz).timestamp())
+    path = day_file(tmp_path, date(2026, 10, 16))
+    path.parent.mkdir(parents=True)
+    import sqlite3
+    with sqlite3.connect(path) as db:
+        db.execute("CREATE TABLE windows (start INTEGER PRIMARY KEY, reports INTEGER, body BLOB)")
+        db.execute("INSERT INTO windows VALUES (?, 1, ?)", (w, b"x"))
+    assert read_window(tmp_path, w, tz) == b"x"
