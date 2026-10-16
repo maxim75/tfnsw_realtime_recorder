@@ -23,6 +23,23 @@ interval. Uses [tfnsw_trip_planner](https://github.com/maxim75/tfnsw_trip_planne
 Feeds and interval are set on the web page and stored in
 `DATA_DIR/settings.json` (default: 10 Sydney-area feeds every 30 s).
 
+## Feeds
+
+Recorded by default (switch any feed on or off on the web page):
+
+`buses`, `sydneytrains`, `metro`, `nswtrains`, `ferries/sydneyferries`,
+`ferries/MFF`, `lightrail/cbdandsoutheast`, `lightrail/innerwest`,
+`lightrail/parramatta`, `regionbuses/sydneysurrounds`
+
+Also available:
+
+`lightrail/newcastle`, `regionbuses/centralwestandorana`,
+`regionbuses/centralwestandorana2`, `regionbuses/farwest`,
+`regionbuses/newcastlehunter`, `regionbuses/newenglandnorthwest`,
+`regionbuses/northcoast`, `regionbuses/northcoast2`, `regionbuses/northcoast3`,
+`regionbuses/riverinamurray`, `regionbuses/riverinamurray2`,
+`regionbuses/southeasttablelands`, `regionbuses/southeasttablelands2`
+
 ## Run locally
 
 Put the variables in `.env`, then:
@@ -92,9 +109,12 @@ SELECT * FROM read_csv('s3://<bucket>/vehiclepos/feed=buses/date=2026-10-16/*.cs
    S3_SECRET_ACCESS_KEY=...
    ```
 
-5. **Health check:** path `/healthz`, port `8000` (the image also has a
-   Docker `HEALTHCHECK`).
-6. Set the container stop/grace timeout to **30 s** so the last partial
-   window is uploaded on redeploy (if it isn't, it's uploaded after the next
-   start).
+5. **Health check:** leave Coolify's own health check disabled. It runs
+   inside the container with curl/wget, which the slim image does not have.
+   The image's Docker `HEALTHCHECK` (Python, hits `/healthz` every 30 s)
+   reports container health instead.
+6. Docker's default stop timeout is 10 s, but the shutdown upload can take up
+   to ~25 s. If Coolify offers it, raise the container stop timeout to 30 s
+   (e.g. via custom Docker run options: `--stop-timeout 30`). Otherwise the
+   last partial window is uploaded after the next start, so nothing is lost.
 7. Run **one** instance only; two would record every feed twice.
