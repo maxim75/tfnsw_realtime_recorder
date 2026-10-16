@@ -13,12 +13,12 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 
-from fastapi import Body, Depends, FastAPI, Header, HTTPException, Request
+from fastapi import Body, Depends, FastAPI, Header, HTTPException, Query, Request
 from fastapi.responses import FileResponse, PlainTextResponse, Response, StreamingResponse
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
 
 from .cities import City, load_cities
-from .config import EnvConfig, SettingsStore
+from .config import ConfigError, EnvConfig, SettingsStore
 from .gtfsrt import GtfsRtClient
 from .history import History
 from .live import LiveHub
@@ -53,7 +53,7 @@ class Components:
     env: EnvConfig
     settings: SettingsStore
     uploader: Any
-    cities: dict[str, CityComponents]  # in config order; the first is the default city
+    cities: dict[str, CityComponents]  # in config order; the first enabled one is the default
     refreshers: list[RouteRefresher] = field(default_factory=list)
 
 
@@ -121,8 +121,10 @@ def create_app(env: EnvConfig | None = None, components: Components | None = Non
         logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
     env = env or EnvConfig.from_env()
     comps = components or build_components(env)
-    # Task 7 adds ?city=; until then the endpoints serve the first city in config order.
-    default = next(iter(comps.cities.values()))
+    if not comps.cities:
+        raise ConfigError("No cities configured: cities.toml has no city sections")
+    # ?city= picks a city; without it the first enabled one (the first at all if none is enabled).
+    default_id = next((cid for cid, cc in comps.cities.items() if not cc.city.disabled_reason), next(iter(comps.cities)))
     recorders = [cc.recorder for cc in comps.cities.values() if cc.recorder is not None]
 
     @asynccontextmanager
@@ -160,6 +162,12 @@ def create_app(env: EnvConfig | None = None, components: Components | None = Non
         if not (user_ok and pass_ok):
             raise HTTPException(401, "Invalid credentials", headers={"WWW-Authenticate": "Basic"})
 
+    def city_of(city: str | None = Query(None)) -> CityComponents:
+        cc = comps.cities.get(default_id if city is None else city)
+        if cc is None:
+            raise HTTPException(404, "Unknown city")
+        return cc
+
     @app.get("/healthz", response_class=PlainTextResponse)
     def healthz() -> PlainTextResponse:
         # A disabled city has no recorder and does not count.
@@ -174,17 +182,38 @@ def create_app(env: EnvConfig | None = None, components: Components | None = Non
     def live_map() -> FileResponse:
         return FileResponse(STATIC_DIR / "map.html")
 
+    @app.get("/api/cities", dependencies=[Depends(require_auth)])
+    def cities() -> list[dict]:
+        out = []
+        for cc in comps.cities.values():
+            city = cc.city
+            modes = {f.mode for f in city.feeds} | cc.routes.modes()
+            out.append({
+                "id": city.id,
+                "name": city.name,
+                "timezone": city.timezone.key,
+                "center": list(city.center),
+                "zoom": city.zoom,
+                "attribution": city.attribution,
+                "modes": sorted(modes),
+                "enabled": not city.disabled_reason,
+                "disabled_reason": city.disabled_reason,
+                "daily_quota": city.daily_quota,
+                "max_requests_per_second": city.max_requests_per_second,
+            })
+        return out
+
     @app.get("/api/live", dependencies=[Depends(require_auth)])
-    def live_snapshot() -> dict:
-        return default.live.snapshot()
+    def live_snapshot(cc: CityComponents = Depends(city_of)) -> dict:
+        return cc.live.snapshot()
 
     @app.get("/api/history/window", dependencies=[Depends(require_auth)])
-    def history_window(start: int) -> Response:
+    def history_window(start: int, cc: CityComponents = Depends(city_of)) -> Response:
         """Recorded reports of the 10-minute window starting at *start* (epoch s), gzip JSON."""
-        if default.history is None:
+        if cc.history is None:
             raise HTTPException(503, "Playback is not available")
         try:
-            body = default.history.window(start)
+            body = cc.history.window(start)
         except ValueError as exc:
             raise HTTPException(422, str(exc)) from exc
         except Exception as exc:
@@ -195,12 +224,13 @@ def create_app(env: EnvConfig | None = None, components: Components | None = Non
 
     @app.get("/api/live/stream", dependencies=[Depends(require_auth)])
     async def live_stream(
-        request: Request, since: int | None = None, last_event_id: str | None = Header(None)
+        request: Request, since: int | None = None, last_event_id: str | None = Header(None),
+        cc: CityComponents = Depends(city_of),
     ) -> StreamingResponse:
         """Server-Sent Events: one event per batch of new reports, id = batch seq."""
         if last_event_id and last_event_id.isdigit():
             since = int(last_event_id)  # an EventSource reconnect resumes where it stopped
-        hub = default.live
+        hub = cc.live
 
         async def events():
             seq = hub.seq if since is None else since
@@ -227,8 +257,8 @@ def create_app(env: EnvConfig | None = None, components: Components | None = Non
         )
 
     @app.get("/api/status", dependencies=[Depends(require_auth)])
-    def status() -> dict:
-        city, recorder = default.city, default.recorder
+    def status(cc: CityComponents = Depends(city_of)) -> dict:
+        city, recorder = cc.city, cc.recorder
         settings = comps.settings.get(city.id)
         feed_status = recorder.status() if recorder else {}
         feeds = []
@@ -241,6 +271,7 @@ def create_app(env: EnvConfig | None = None, components: Components | None = Non
                 **asdict(st or FeedStatus()),
             })
         return {
+            "city": city.id,
             "recorder": {
                 "alive": bool(recorder and recorder.alive),
                 "started_at": recorder.started_at if recorder else None,
@@ -256,9 +287,9 @@ def create_app(env: EnvConfig | None = None, components: Components | None = Non
         }
 
     @app.put("/api/settings", dependencies=[Depends(require_auth)])
-    def update_settings(payload: Any = Body(...)) -> dict:
+    def update_settings(payload: Any = Body(...), cc: CityComponents = Depends(city_of)) -> dict:
         try:
-            return comps.settings.update(default.city.id, payload).to_dict()
+            return comps.settings.update(cc.city.id, payload).to_dict()
         except ValueError as exc:
             raise HTTPException(422, str(exc)) from exc
 

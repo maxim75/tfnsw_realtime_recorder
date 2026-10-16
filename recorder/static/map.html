@@ -37,6 +37,8 @@
 <div id="map"></div>
 <div id="panel">
   <h1>Vehicles</h1>
+  <div class="row"><select id="city" aria-label="City"></select></div>
+  <div id="cityNote" class="muted" hidden></div>
   <div class="tabs"><button id="tabLive" class="on">Live</button><button id="tabPlay">Playback</button></div>
   <div id="state" class="row muted">Loading…</div>
 
@@ -67,45 +69,48 @@
       Colour <select id="colour"><option value="route">by route</option><option value="speed">by speed</option><option value="mode">by mode</option></select>
       <label><input id="trails" type="checkbox" checked> Trails</label>
     </div>
-    <div class="row muted"><a href="/">Recorder status</a></div>
+    <div id="attrib" class="row muted"></div>
+    <div class="row muted"><a href="/" id="statusLink">Recorder status</a></div>
   </details>
 </div>
 <script>
 const api = (path) => new URL(path, location.origin);  // origin never carries user:pass@
 const $ = (id) => document.getElementById(id);
-const GROUPS = [
-  ["buses", "Buses", (f) => f === "buses", true],
-  ["sydneytrains", "Trains", (f) => f === "sydneytrains", false],
-  ["metro", "Metro", (f) => f === "metro", false],
-  ["nswtrains", "TrainLink", (f) => f === "nswtrains", false],
-  ["ferries", "Ferries", (f) => f.startsWith("ferries"), false],
-  ["lightrail", "Light rail", (f) => f.startsWith("lightrail"), false],
-  ["regionbuses", "Regional buses", (f) => f.startsWith("regionbuses"), false],
+// Modes in display order; a city lists only the ones it has (from /api/cities).
+const MODES = [
+  ["metro", "Metro", [22, 128, 128]],
+  ["tram", "Tram/light rail", [196, 30, 58]],
+  ["rail", "Train", [242, 133, 0]],
+  ["bus", "Bus", [0, 112, 210]],
+  ["ferry", "Ferry", [0, 150, 70]],
+  ["trolleybus", "Trolleybus", [120, 80, 180]],
+  ["cable", "Cable car", [140, 90, 40]],
+  ["other", "Other", [120, 120, 120]],
 ];
-const MODE_COLOURS = { buses: [0, 112, 210], sydneytrains: [242, 133, 0], metro: [22, 128, 128], nswtrains: [217, 75, 35],
-                       ferries: [0, 150, 70], lightrail: [196, 30, 58], regionbuses: [120, 80, 180] };
+const MODE_COLOURS = Object.fromEntries(MODES.map(([m, , c]) => [m, c]));
+let cities = [], city = null, epoch = 0;  // epoch changes with the city so late responses can be dropped
 // HIDE_AFTER_S: a vehicle with no report for this long (trip ended, out of service) is no longer drawn.
 // APPEAR_BEFORE_S: a vehicle is drawn from this long before its first known report.
 const LIVE_HISTORY = 8, FORGET_S = 600, HIDE_AFTER_S = 150, APPEAR_BEFORE_S = 30, MAX_GAP_S = 180, TRAIL_S = 90;
 const WINDOW_S = 600, KEEP_BEHIND_S = 1800;  // playback: 10-minute windows; keep 30 min of history loaded
 
-const groupOf = (feed) => (GROUPS.find(([, , match]) => match(feed)) || ["buses"])[0];
 const shortRoute = (route) => route.includes("_") ? route.slice(route.lastIndexOf("_") + 1) : route;
 
-// A store holds vehicles: "feed|vehicle" -> {feed, group, vid, route, label, reports: [[ts, lon, lat, bearing, speed]] sorted by ts}
+// A store holds vehicles: "feed|vehicle" -> {feed, mode, vid, route, label, reports: [[ts, lon, lat, bearing, speed]] sorted by ts}
 const live = { vehicles: new Map(), version: 0, lastBatchAt: 0 };
 const play = { vehicles: new Map(), version: 0, windows: new Map(), t: 0, playing: false, base: 0 };
 let mode = "live";
 
 function addReport(store, feed, r, maxHistory) {
-  const [vid, route, ts, lon, lat, bearing, speed] = r;
+  const [vid, route, ts, lon, lat, bearing, speed, name, kind] = r;
+  const label = name || shortRoute(route || ""), mode = MODE_COLOURS[kind] ? kind : "other";
   const key = feed + "|" + vid;
   let v = store.vehicles.get(key);
-  if (!v) store.vehicles.set(key, v = { feed, group: groupOf(feed), vid, route, label: shortRoute(route), reports: [] });
+  if (!v) store.vehicles.set(key, v = { feed, mode, vid, route: route || "", label, reports: [] });
   const rs = v.reports, rep = [ts, lon, lat, bearing, speed];
   if (!rs.length || ts > rs[rs.length - 1][0]) {
     rs.push(rep);
-    v.route = route; v.label = shortRoute(route);
+    v.route = route || ""; v.label = label; v.mode = mode;
   } else {  // playback windows can arrive in any order
     const i = lowerBound(rs, ts);
     if (rs[i] && rs[i][0] === ts) return;
@@ -136,7 +141,7 @@ function speedColour(mps) {
 const routeColours = new Map();
 function colourFor(v, by, speed) {
   if (by === "speed") return speedColour(speed);
-  if (by === "mode") return MODE_COLOURS[v.group];
+  if (by === "mode") return MODE_COLOURS[v.mode];
   if (!routeColours.has(v.route)) routeColours.set(v.route, hashColour(v.route));
   return routeColours.get(v.route);
 }
@@ -166,48 +171,61 @@ function positionAt(v, t) {
           moved ? headingDeg(a[1], a[2], b[1], b[2]) : (b[3] ?? a[3]), b[4], a[0]];
 }
 
-// --- Sydney time helpers ---------------------------------------------------------
-const SYD = "Australia/Sydney";
-const partsFmt = new Intl.DateTimeFormat("en-AU", { timeZone: SYD, hourCycle: "h23",
-  year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", second: "2-digit" });
-function sydParts(epoch) {
-  const p = Object.fromEntries(partsFmt.formatToParts(new Date(epoch * 1000)).map((x) => [x.type, x.value]));
+// --- time helpers (all in the selected city's IANA zone) ---------------------------
+const fmtCache = new Map();
+function fmtFor(kind, tz) {
+  const key = kind + "|" + tz;
+  if (!fmtCache.has(key)) {
+    fmtCache.set(key, kind === "parts"
+      ? new Intl.DateTimeFormat("en-AU", { timeZone: tz, hourCycle: "h23",
+          year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", second: "2-digit" })
+      : new Intl.DateTimeFormat("en-AU", { timeZone: tz, weekday: "short", day: "numeric", month: "short",
+          hour: "2-digit", minute: "2-digit", second: "2-digit", hourCycle: "h23" }));
+  }
+  return fmtCache.get(key);
+}
+function zoneParts(epoch, tz) {
+  const p = Object.fromEntries(fmtFor("parts", tz).formatToParts(new Date(epoch * 1000)).map((x) => [x.type, x.value]));
   return { date: `${p.year}-${p.month}-${p.day}`, h: +p.hour, mi: +p.minute, s: +p.second };
 }
-/** Epoch of Sydney-local *date* (YYYY-MM-DD) plus *secs* since midnight. */
-function sydEpoch(date, secs) {
+/** Epoch of *date* (YYYY-MM-DD) plus *secs* since midnight, local time in zone *tz*. */
+function zoneEpoch(date, secs, tz) {
   const [y, m, d] = date.split("-").map(Number);
   const want = Date.UTC(y, m - 1, d) / 1000 + secs;
-  let t = want - 11 * 3600;
-  for (let k = 0; k < 3; k++) {  // correct for the UTC offset on that day (DST)
-    const p = sydParts(t), [py, pm, pd] = p.date.split("-").map(Number);
+  let t = want;
+  for (let k = 0; k < 3; k++) {  // correct for the zone's UTC offset on that day (DST)
+    const p = zoneParts(t, tz), [py, pm, pd] = p.date.split("-").map(Number);
     t += want - (Date.UTC(py, pm - 1, pd) / 1000 + p.h * 3600 + p.mi * 60 + p.s);
   }
   return t;
 }
-const clockFmt = new Intl.DateTimeFormat("en-AU", { timeZone: SYD, weekday: "short", day: "numeric", month: "short",
-  hour: "2-digit", minute: "2-digit", second: "2-digit", hourCycle: "h23" });
+const clockText = (epoch) => fmtFor("clock", city.timezone).format(new Date(epoch * 1000));
 
 // --- filters -----------------------------------------------------------------
-$("feeds").innerHTML = GROUPS.map(([g, name, , on]) =>
-  `<label><input type="checkbox" value="${g}" ${on ? "checked" : ""}> ${name}</label>`).join("");
-let enabledGroups, routeFilter;
+let enabledModes = new Set(), routeFilter;
+function buildModes() {  // one checkbox per mode the city has, all on
+  const have = new Set(city.modes);
+  $("feeds").innerHTML = MODES.filter(([m]) => have.has(m)).map(([m, name]) =>
+    `<label><input type="checkbox" value="${m}" checked> ${name}</label>`).join("");
+  document.querySelectorAll("#feeds input").forEach((el) => el.addEventListener("input", readFilters));
+  readFilters();
+}
 function readFilters() {
-  enabledGroups = new Set([...document.querySelectorAll("#feeds input:checked")].map((i) => i.value));
+  enabledModes = new Set([...document.querySelectorAll("#feeds input:checked")].map((i) => i.value));
   const routes = $("routes").value.split(/[\s,]+/).filter(Boolean).map((s) => s.toUpperCase());
   routeFilter = routes.length ? new Set(routes) : null;
   live.version++; play.version++;
 }
-document.querySelectorAll("#feeds input, #routes").forEach((el) => el.addEventListener("input", readFilters));
-readFilters();
-const visible = (v) => enabledGroups.has(v.group) && (!routeFilter || routeFilter.has(v.label.toUpperCase()) || routeFilter.has(v.route.toUpperCase()));
+$("routes").addEventListener("input", readFilters);
+const visible = (v) => enabledModes.has(v.mode) && (!routeFilter || routeFilter.has(v.label.toUpperCase()) || routeFilter.has(v.route.toUpperCase()));
 
 // --- map ---------------------------------------------------------------------
 const dark = matchMedia("(prefers-color-scheme: dark)").matches;
 const map = new maplibregl.Map({
   container: "map",
   style: `https://tiles.openfreemap.org/styles/${dark ? "dark" : "positron"}`,
-  center: [151.05, -33.85], zoom: 10.3, maxZoom: 19, attributionControl: { compact: true },
+  center: [0, 20], zoom: 1.5,  // placeholder until /api/cities says where the city is
+   maxZoom: 19, attributionControl: { compact: true },
 });
 map.addControl(new maplibregl.NavigationControl({ showCompass: true }), "top-right");
 map.addControl(new maplibregl.ScaleControl(), "bottom-left");
@@ -218,12 +236,12 @@ const ARROW = {
     '<path d="M32 4 L54 56 L32 44 L10 56 Z" fill="#fff"/></svg>'),
   width: 64, height: 64, anchorY: 32, mask: true,
 };
-const timeOfDay = (ts) => new Date(ts * 1000).toLocaleTimeString("en-AU", { timeZone: SYD, hour12: false });
+const timeOfDay = (ts) => new Date(ts * 1000).toLocaleTimeString("en-AU", { timeZone: city.timezone, hour12: false });
 
 const overlay = new deck.MapboxOverlay({
   interleaved: true,
   getTooltip: ({ object: d }) => d && {
-    html: `<b>${d.v.group === "buses" ? "Route" : ""} ${d.v.label || "—"}</b> <span style="opacity:.7">${d.v.feed}</span><br>` +
+    html: `<b>${d.v.mode === "bus" ? "Route" : ""} ${d.v.label || "—"}</b> <span style="opacity:.7">${d.v.feed}</span><br>` +
           `Vehicle ${d.v.vid}<br>${d.speed == null ? "" : `${Math.round(d.speed * 3.6)} km/h · `}report ${timeOfDay(d.ts)}`,
     style: { fontSize: "12px", padding: "6px 8px" },
   },
@@ -289,23 +307,27 @@ function render(store, t, base) {
 
 // --- live ----------------------------------------------------------------------
 const liveBase = Math.floor(Date.now() / 1000) - 3600;  // keeps TripsLayer timestamps small (float32)
+let liveEs = null;
 async function startLive() {
-  const r = await fetch(api("/api/live"));
+  const gen = epoch, id = city.id;
+  const r = await fetch(api(`/api/live?city=${encodeURIComponent(id)}`));
+  if (gen !== epoch) return;  // the city changed while loading
   if (!r.ok) { $("state").textContent = `Error ${r.status} loading positions`; return; }
   const snap = await r.json();
+  if (gen !== epoch) return;
   for (const [feed, reports] of Object.entries(snap.feeds)) for (const rep of reports) addReport(live, feed, rep, LIVE_HISTORY);
   live.lastBatchAt = Date.now(); live.version++;
-  const es = new EventSource(api(`/api/live/stream?since=${snap.seq}`));
-  es.onmessage = (e) => {
+  liveEs = new EventSource(api(`/api/live/stream?city=${encodeURIComponent(id)}&since=${snap.seq}`));
+  liveEs.onmessage = (e) => {
     const batch = JSON.parse(e.data);
     for (const rep of batch.reports) addReport(live, batch.feed, rep, LIVE_HISTORY);
     live.lastBatchAt = Date.now(); live.version++;
   };
-  setInterval(() => {  // forget vehicles that stopped reporting
-    const cutoff = Date.now() / 1000 - FORGET_S - 300;
-    for (const [k, v] of live.vehicles) if (v.reports[v.reports.length - 1][0] < cutoff) live.vehicles.delete(k);
-  }, 30000);
 }
+setInterval(() => {  // forget vehicles that stopped reporting
+  const cutoff = Date.now() / 1000 - FORGET_S - 300;
+  for (const [k, v] of live.vehicles) if (v.reports[v.reports.length - 1][0] < cutoff) live.vehicles.delete(k);
+}, 30000);
 
 // --- playback ------------------------------------------------------------------
 const windowOf = (t) => Math.floor(t / WINDOW_S) * WINDOW_S;
@@ -328,13 +350,14 @@ function ensureWindows() {
   }
 }
 async function loadWindow(w) {
+  const gen = epoch;
   play.windows.set(w, { state: "loading" });
   inFlight++;
   try {
-    const r = await fetch(api(`/api/history/window?start=${w}`));
+    const r = await fetch(api(`/api/history/window?city=${encodeURIComponent(city.id)}&start=${w}`));
     if (!r.ok) throw new Error(`HTTP ${r.status}`);
     const body = await r.json();
-    if (!play.windows.has(w)) return;  // pruned while loading
+    if (gen !== epoch || !play.windows.has(w)) return;  // city changed, or pruned while loading
     let n = 0;
     for (const [feed, reports] of Object.entries(body.feeds)) for (const rep of reports) { addReport(play, feed, rep); n++; }
     // Windows that may still grow (the last ~15 min) are fetched again later.
@@ -342,7 +365,7 @@ async function loadWindow(w) {
     play.windows.set(w, { state: n ? "loaded" : "empty", at: Date.now(), settled });
     play.version++;
   } catch (e) {
-    play.windows.set(w, { state: "error", at: Date.now(), error: String(e) });
+    if (gen === epoch) play.windows.set(w, { state: "error", at: Date.now(), error: String(e) });
   } finally {
     inFlight--;
   }
@@ -373,8 +396,8 @@ function seek(t, { keepData = false } = {}) {
   play.version++;
 }
 function syncPlayInputs(all) {
-  const p = sydParts(play.t);
-  $("clock").textContent = clockFmt.format(new Date(play.t * 1000));
+  const p = zoneParts(play.t, city.timezone);
+  $("clock").textContent = clockText(play.t);
   if (document.activeElement !== $("slider")) $("slider").value = p.h * 3600 + p.mi * 60 + p.s;
   if (all || $("date").value !== p.date) $("date").value = p.date;
   const hhmm = `${String(p.h).padStart(2, "0")}:${String(p.mi).padStart(2, "0")}`;
@@ -389,12 +412,12 @@ $("playBtn").addEventListener("click", () => {
   if (!play.playing && play.t >= latestPlayable() - 1) return;  // at the present already
   setPlaying(!play.playing);
 });
-$("slider").addEventListener("input", () => seek(sydEpoch($("date").value, Number($("slider").value))));
-$("date").addEventListener("change", () => $("date").value && seek(sydEpoch($("date").value, Number($("slider").value))));
+$("slider").addEventListener("input", () => seek(zoneEpoch($("date").value, Number($("slider").value), city.timezone)));
+$("date").addEventListener("change", () => $("date").value && seek(zoneEpoch($("date").value, Number($("slider").value), city.timezone)));
 $("time").addEventListener("change", () => {
   if (!$("time").value) return;
   const [h, m] = $("time").value.split(":").map(Number);
-  seek(sydEpoch($("date").value, h * 3600 + m * 60));
+  seek(zoneEpoch($("date").value, h * 3600 + m * 60, city.timezone));
 });
 $("speed").addEventListener("change", ensureWindows);
 document.addEventListener("keydown", (e) => {
@@ -449,7 +472,73 @@ function frame(now) {
   requestAnimationFrame(frame);
 }
 
-map.on("load", () => { startLive(); requestAnimationFrame(frame); });
+// --- cities ------------------------------------------------------------------
+const rememberCity = (id) => { try { localStorage.setItem("city", id); } catch (e) {} };
+const recalledCity = () => { try { return localStorage.getItem("city"); } catch (e) { return null; } };
+
+/** Make *id* the shown city: fly there, restart the live stream, drop both stores, rebuild the filters. */
+function selectCity(id, { fly = true, time = null } = {}) {
+  const c = cities.find((x) => x.id === id);
+  if (!c) return;
+  epoch++;
+  city = c;
+  rememberCity(id);
+  if (location.hash.slice(1).split("/")[0] !== id || time == null) history.replaceState(null, "", "#" + id);
+  $("city").value = id;
+  $("cityNote").hidden = c.enabled;
+  $("cityNote").textContent = c.enabled ? "" : `Recording disabled: ${c.disabled_reason}`;
+  $("attrib").textContent = c.attribution;
+  $("statusLink").href = "/#" + id;
+  const view = { center: c.center, zoom: c.zoom };
+  if (fly) map.flyTo(view); else map.jumpTo(view);
+  if (liveEs) { liveEs.close(); liveEs = null; }
+  live.vehicles.clear(); live.lastBatchAt = 0; live.version++;
+  play.vehicles.clear(); play.windows.clear(); play.t = 0; play.lastSeek = undefined; play.version++;
+  setPlaying(false);
+  buildModes();
+  startLive();
+  if (time) {
+    const [h, m] = time.split(":").map(Number);
+    const today = zoneParts(Date.now() / 1000, c.timezone).date;
+    setMode("play");
+    seek(zoneEpoch(today, h * 3600 + m * 60, c.timezone));
+  } else if (mode === "play") {
+    setMode("play");  // play.t is 0, so this restarts at 30 minutes ago in the new city's time
+  }
+}
+
+function parseHash() {
+  const [id, time] = location.hash.slice(1).split("/");
+  return { id, time: /^\d{1,2}:\d{2}$/.test(time || "") ? time : null };
+}
+function initialCity() {
+  const { id, time } = parseHash();
+  const wanted = cities.find((c) => c.id === id) || cities.find((c) => c.id === recalledCity());
+  return { id: (wanted || cities.find((c) => c.enabled) || cities[0]).id, time: wanted && wanted.id === id ? time : null };
+}
+$("city").addEventListener("change", () => selectCity($("city").value));
+window.addEventListener("hashchange", () => {
+  const { id, time } = parseHash();
+  if (!cities.some((c) => c.id === id)) return;
+  if (id !== city.id) selectCity(id, { time });
+  else if (time) selectCity(id, { time, fly: false });
+});
+
+async function init() {
+  try {
+    const r = await fetch(api("/api/cities"));
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    cities = await r.json();
+  } catch (e) { $("state").textContent = `Could not load cities (${e.message})`; return; }
+  if (!cities.length) { $("state").textContent = "No cities configured"; return; }
+  $("city").innerHTML = cities.map((c) => `<option value="${c.id}">${c.name}${c.enabled ? "" : " (disabled)"}</option>`).join("");
+  await mapLoaded;
+  const { id, time } = initialCity();
+  selectCity(id, { fly: false, time });
+  requestAnimationFrame(frame);
+}
+const mapLoaded = new Promise((resolve) => map.on("load", resolve));
+init();
 </script>
 </body>
 </html>

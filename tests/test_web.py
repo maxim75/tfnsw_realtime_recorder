@@ -375,7 +375,7 @@ def test_build_components_with_sydney_disabled(tmp_path):
     assert isinstance(comps.cities["prague"].recorder, Recorder)
     with TestClient(create_app(comps.env, comps)) as client:
         assert client.get("/healthz").status_code == 200
-        r = client.get(f"/api/history/window?start={W1800}", auth=AUTH)
+        r = client.get(f"/api/history/window?city=sydney&start={W1800}", auth=AUTH)
         assert r.status_code == 200
         assert r.json()["feeds"]["buses"] == [["a", "2510_333", W1800 + 10, 151.2, -33.8, 90.0, 5.0, "333", "bus"]]
         assert comps.cities["prague"].recorder.alive
@@ -414,3 +414,145 @@ def test_build_components_labels_prague_lines_from_cached_routes(tmp_path):
         assert comps.refreshers[0].alive
     assert not comps.refreshers[0].alive
     assert session.calls == []  # cache is fresh: no download
+
+
+# -- multi-city API ---------------------------------------------------------------
+
+def _publish_prague(comps, vehicle="p"):
+    now = datetime.now(tz=timezone.utc)
+    comps.cities["prague"].live.publish("all", now, [Position(
+        vehicle_id=vehicle, trip_id="t", route_id="L22", latitude=50.08, longitude=14.44,
+        bearing=None, speed=None, timestamp=now,
+    )])
+
+
+def test_cities_lists_config_in_order(ctx):
+    client, _ = ctx
+    body = client.get("/api/cities", auth=AUTH).json()
+    assert [c["id"] for c in body] == ["sydney", "prague"]
+    syd, prague = body
+    assert syd["name"] == "Sydney" and syd["timezone"] == "Australia/Sydney"
+    assert len(syd["center"]) == 2
+    assert syd["zoom"] > 0 and syd["attribution"]
+    assert syd["modes"] == sorted(syd["modes"]) and {"bus", "metro", "rail", "ferry", "tram"} <= set(syd["modes"])
+    assert syd["enabled"] is True and syd["disabled_reason"] is None
+    assert syd["daily_quota"] == 60000 and syd["max_requests_per_second"] > 0
+    assert prague["timezone"] == "Europe/Prague" and prague["daily_quota"] is None
+    assert "secret" not in str(body)
+
+
+def test_cities_modes_include_gtfs_modes(tmp_path):
+    (tmp_path / "prague").mkdir()
+    (tmp_path / "prague" / "routes.json").write_text(json.dumps(
+        {"checked": time.time(), "last_modified": None, "routes": {"L992": ["B", "metro"], "L9": ["9", "tram"]}}
+    ))
+    comps = make_components(tmp_path)
+    with TestClient(create_app(comps.env, comps)) as client:
+        prague = client.get("/api/cities", auth=AUTH).json()[1]
+    assert {"metro", "tram"} <= set(prague["modes"]) and prague["modes"] == sorted(prague["modes"])
+
+
+def test_cities_reports_disabled_city(tmp_path):
+    comps = make_components(tmp_path)
+    comps.cities["sydney"].recorder = None
+    comps.cities["sydney"] = CityComponents(
+        city=load_cities(env={})["sydney"], recorder=None, live=comps.cities["sydney"].live,
+        history=comps.cities["sydney"].history, routes=comps.cities["sydney"].routes,
+    )
+    with TestClient(create_app(comps.env, comps)) as client:
+        body = client.get("/api/cities", auth=AUTH).json()
+        assert body[0]["enabled"] is False and "TFNSW_API_KEY" in body[0]["disabled_reason"]
+        assert body[1]["enabled"] is True
+        # the default city is the first enabled one
+        assert client.get("/api/status", auth=AUTH).json()["city"] == "prague"
+
+
+def test_default_city_falls_back_to_first_when_none_enabled(tmp_path):
+    comps = make_components(tmp_path)
+    for cid, c in load_cities(env={}).items():
+        old = comps.cities[cid]
+        comps.cities[cid] = CityComponents(
+            city=c if c.disabled_reason else _disabled(c), recorder=None,
+            live=old.live, history=old.history, routes=old.routes)
+    with TestClient(create_app(comps.env, comps)) as client:
+        assert client.get("/api/status", auth=AUTH).json()["city"] == "sydney"
+
+
+def _disabled(city):
+    from dataclasses import replace
+    return replace(city, disabled_reason="off")
+
+
+def test_empty_cities_config_fails_at_startup(tmp_path):
+    from recorder.config import ConfigError
+
+    comps = make_components(tmp_path)
+    comps.cities.clear()
+    with pytest.raises(ConfigError, match="cities"):
+        create_app(comps.env, comps)
+
+
+def test_unknown_city_is_404_everywhere(ctx):
+    client, _ = ctx
+    for method, path in (
+        ("GET", "/api/status"), ("GET", "/api/live"), ("GET", "/api/live/stream"),
+        ("GET", "/api/history/window?start=1792134000"), ("PUT", "/api/settings"),
+    ):
+        kwargs = {"json": {"feeds": [], "interval": 30}} if method == "PUT" else {}
+        sep = "&" if "?" in path else "?"
+        r = client.request(method, f"{path}{sep}city=nowhere", auth=AUTH, **kwargs)
+        assert r.status_code == 404 and r.json() == {"detail": "Unknown city"}, path
+
+
+def test_status_for_prague(ctx):
+    client, _ = ctx
+    body = client.get("/api/status?city=prague", auth=AUTH).json()
+    assert body["city"] == "prague"
+    assert [f["feed"] for f in body["feeds"]] == ["all"]
+    assert body["feeds"][0]["version"] == "v2"  # from /v2/ in the feed URL
+    assert body["quota"]["daily_quota"] is None
+    assert client.get("/api/status", auth=AUTH).json()["city"] == "sydney"
+
+
+def test_update_settings_for_prague(ctx):
+    client, comps = ctx
+    r = client.put("/api/settings?city=prague", json={"feeds": ["all"], "interval": 20}, auth=AUTH)
+    assert r.status_code == 200 and r.json()["interval"] == 20
+    assert comps.settings.get("prague").interval == 20
+    assert comps.settings.get("sydney").interval == 30
+
+
+def test_live_snapshot_per_city(ctx):
+    client, comps = ctx
+    _publish(comps)
+    _publish_prague(comps)
+    syd = client.get("/api/live", auth=AUTH).json()
+    prague = client.get("/api/live?city=prague", auth=AUTH).json()
+    assert list(syd["feeds"]) == ["buses"] and list(prague["feeds"]) == ["all"]
+    assert prague["feeds"]["all"][0][0] == "p"
+
+
+def test_live_stream_uses_city_hub(ctx):
+    client, comps = ctx
+    _publish(comps)
+    _publish_prague(comps)
+    comps.cities["prague"].live.close()
+    with client.stream("GET", "/api/live/stream?city=prague&since=0", auth=AUTH) as r:
+        text = "".join(r.iter_text())
+    assert '"feed":"all"' in text and '"p"' in text and '"buses"' not in text
+
+
+def test_history_window_uses_city_history(ctx, tmp_path):
+    client, comps = ctx
+    path = tmp_path / "prague" / "complete" / "all" / "all_2026-10-16T09-00+0200.csv.gz"
+    path.parent.mkdir(parents=True)
+    path.write_bytes(gzip.compress(
+        b"fetched_at,timestamp,vehicle_id,trip_id,route_id,latitude,longitude,bearing,speed\n"
+        b"2026-10-16T09:00:20+02:00,2026-10-16T09:00:10+02:00,p,t,L22,50.08,14.44,,\n"
+    ))
+    start = 1792134000  # 2026-10-16 09:00 CEST (07:00 UTC)
+    r = client.get(f"/api/history/window?city=prague&start={start}", auth=AUTH)
+    assert r.status_code == 200
+    assert r.json()["feeds"]["all"][0][:2] == ["p", "L22"]
+    comps.cities["prague"].history = None
+    assert client.get(f"/api/history/window?city=prague&start={start}", auth=AUTH).status_code == 503

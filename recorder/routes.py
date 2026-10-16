@@ -105,6 +105,10 @@ class RouteInfo:
         entry = self._routes.get(route_id) if route_id is not None else None
         return entry[1] if entry else feed.mode
 
+    def modes(self) -> set[str]:
+        """Every mode that occurs in the loaded GTFS routes (empty without a mapping)."""
+        return {mode for _, mode in self._routes.values()}
+
     def refresh(self) -> None:
         """Re-download the static feed if the cache is over 24 h old. Never raises."""
         url = self._city.static_gtfs
