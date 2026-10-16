@@ -1,9 +1,22 @@
 [project]
 name = "tfnsw-realtime-recorder"
 version = "0.1.0"
-description = "Record TfNSW live vehicle positions (GTFS-Realtime) to CSV for later analysis"
+description = "Record TfNSW live vehicle positions to 10-minute files and upload them to S3"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
+    "boto3>=1.43.114",
+    "fastapi>=0.143.2",
     "tfnsw-trip-planner[realtime]>=1.4.0",
+    "uvicorn>=0.54.0",
 ]
+
+[dependency-groups]
+dev = [
+    "httpx>=0.28.1",
+    "pytest>=9.1.1",
+]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["tests"]
