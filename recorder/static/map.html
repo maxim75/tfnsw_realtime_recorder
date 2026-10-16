@@ -157,6 +157,24 @@ function headingDeg(lon0, lat0, lon1, lat1) {
 const metres = (lon0, lat0, lon1, lat1) =>
   Math.hypot((lon1 - lon0) * 111320 * Math.cos(lat0 * toRad), (lat1 - lat0) * 110540);
 
+// A step between two reports is impossible (bad GPS fix) when covering it would need more than the
+// mode's top speed, allowing JUMP_SLACK_M of GPS jitter. Trails break there and the dot jumps.
+const MAX_KMH = { rail: 200, metro: 130 }, DEFAULT_MAX_KMH = 120, JUMP_SLACK_M = 150;
+const impossibleStep = (mode, a, b) =>
+  metres(a[1], a[2], b[1], b[2]) - JUMP_SLACK_M > (MAX_KMH[mode] ?? DEFAULT_MAX_KMH) / 3.6 * Math.max(1, b[0] - a[0]);
+/** A vehicle's reports split where it went unseen for over MAX_GAP_S or made an impossible step. */
+function trailRuns(v) {
+  const runs = [];
+  let run = [v.reports[0]];
+  for (let i = 1; i < v.reports.length; i++) {
+    const a = v.reports[i - 1], b = v.reports[i];
+    if (b[0] - a[0] > MAX_GAP_S || impossibleStep(v.mode, a, b)) { runs.push(run); run = []; }
+    run.push(b);
+  }
+  runs.push(run);
+  return runs.filter((r) => r.length >= 2);
+}
+
 /** [lon, lat, heading, speed, lastReportTs] of vehicle *v* at time *t*, or null when it isn't on the road then. */
 function positionAt(v, t) {
   const rs = v.reports;
@@ -165,7 +183,7 @@ function positionAt(v, t) {
   if (i < 0) return [rs[0][1], rs[0][2], rs[0][3], rs[0][4], rs[0][0]];
   const a = rs[i], b = rs[i + 1];
   if (t - a[0] > HIDE_AFTER_S && (!b || b[0] - a[0] > MAX_GAP_S)) return null;
-  if (!b || b[0] - a[0] > MAX_GAP_S) return [a[1], a[2], a[3], a[4], a[0]];
+  if (!b || b[0] - a[0] > MAX_GAP_S || impossibleStep(v.mode, a, b)) return [a[1], a[2], a[3], a[4], a[0]];
   const f = (t - a[0]) / (b[0] - a[0]);
   const moved = metres(a[1], a[2], b[1], b[2]) > 5;
   return [a[1] + (b[1] - a[1]) * f, a[2] + (b[2] - a[2]) * f,
@@ -256,7 +274,7 @@ function trailsFor(store, base) {
     trails.data = [];
     for (const v of store.vehicles.values()) {
       if (v.reports.length < 2 || !visible(v)) continue;
-      trails.data.push({ v, path: v.reports.map((r) => [r[1], r[2]]), times: v.reports.map((r) => r[0] - base) });
+      for (const run of trailRuns(v)) trails.data.push({ v, path: run.map((r) => [r[1], r[2]]), times: run.map((r) => r[0] - base) });
     }
     Object.assign(trails, { store, version: store.version, base });
   }
