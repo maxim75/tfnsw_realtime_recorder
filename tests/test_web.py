@@ -16,8 +16,10 @@ from recorder.recorder import FeedStatus, Recorder
 from recorder.routes import RouteInfo
 from recorder.web import CityComponents, Components, build_components, create_app
 
+from repo_env import REPO_ENV
+
 AUTH = ("admin", "secret")
-CITIES = load_cities(env={"TFNSW_API_KEY": "k"})
+CITIES = load_cities(env=REPO_ENV)  # every city enabled
 
 
 class FakeRecorder:
@@ -351,16 +353,16 @@ def build(tmp_path, cities, s3=None, session=None):
 
 def test_build_components_records_every_city_with_own_clients(tmp_path):
     comps = build(tmp_path, CITIES)
-    assert list(comps.cities) == ["sydney", "prague", "kyiv"]
-    recorders = [cc.recorder for cc in comps.cities.values()]
-    assert all(isinstance(r, Recorder) for r in recorders)
-    assert [r.city.id for r in recorders] == ["sydney", "prague", "kyiv"]
-    assert len(FakeGtfsRtClient.instances) == 3
-    assert recorders[0]._client is not recorders[1]._client  # one session per thread
-    assert recorders[1]._data_dir == tmp_path / "prague"
-    assert [r._settings.get() for r in recorders] == [comps.settings.get(c) for c in comps.cities]
-    assert comps.uploader.status()["prefixes"] == {
-        "sydney": "vehiclepos", "prague": "vehiclepos/city=prague", "kyiv": "vehiclepos/city=kyiv"}
+    assert list(comps.cities) == list(CITIES)
+    recorders = {cid: cc.recorder for cid, cc in comps.cities.items()}
+    assert all(isinstance(r, Recorder) for r in recorders.values())
+    assert all(r.city.id == cid for cid, r in recorders.items())
+    assert len(FakeGtfsRtClient.instances) == len(CITIES)
+    assert recorders["sydney"]._client is not recorders["prague"]._client  # one session per thread
+    assert recorders["prague"]._data_dir == tmp_path / "prague"
+    assert all(r._settings.get() == comps.settings.get(cid) for cid, r in recorders.items())
+    assert comps.uploader.status()["prefixes"] == {c.id: c.s3_prefix for c in CITIES.values()}
+    assert comps.uploader.status()["prefixes"]["sydney"] == "vehiclepos"
     assert comps.cities["prague"].history.tz.key == "Europe/Prague"
 
 
@@ -410,7 +412,8 @@ def test_build_components_labels_prague_lines_from_cached_routes(tmp_path):
         bearing=None, speed=None, timestamp=now,
     )])
     assert comps.cities["prague"].live.snapshot()["feeds"]["all"][0][7:] == ["B", "metro"]
-    assert [r._city_id for r in comps.refreshers] == ["prague", "kyiv"]  # Sydney has no static GTFS
+    assert [r._city_id for r in comps.refreshers] == [c.id for c in CITIES.values() if c.static_gtfs]
+    assert "prague" in [r._city_id for r in comps.refreshers] and "sydney" not in [r._city_id for r in comps.refreshers]
     with TestClient(create_app(comps.env, comps)):
         assert comps.refreshers[0].alive
     assert not comps.refreshers[0].alive
@@ -430,8 +433,9 @@ def _publish_prague(comps, vehicle="p"):
 def test_cities_lists_config_in_order(ctx):
     client, _ = ctx
     body = client.get("/api/cities", auth=AUTH).json()
-    assert [c["id"] for c in body] == ["sydney", "prague", "kyiv"]
-    syd, prague, _ = body
+    assert [c["id"] for c in body] == list(CITIES)
+    by_id = {c["id"]: c for c in body}
+    syd, prague = by_id["sydney"], by_id["prague"]
     assert syd["name"] == "Sydney" and syd["timezone"] == "Australia/Sydney"
     assert len(syd["center"]) == 2
     assert syd["zoom"] > 0 and syd["attribution"]
