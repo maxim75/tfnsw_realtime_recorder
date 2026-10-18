@@ -35,11 +35,16 @@ class City:
     daily_quota: int | None
     default_feeds: tuple[str, ...]
     feeds: tuple[Feed, ...]
-    headers: dict[str, str]  # env references already expanded
+    header_sets: tuple[dict[str, str], ...]  # one per API key, env expanded; requests rotate through them
     route_label_pattern: str | None = None
     static_gtfs: str | None = None
     disabled_reason: str | None = None  # e.g. "TFNSW_API_KEY is not set"
     _by_id: dict[str, Feed] = field(default_factory=dict, repr=False, compare=False)
+
+    @property
+    def headers(self) -> dict[str, str]:
+        """The first header set (``{}`` when the city sends none)."""
+        return self.header_sets[0] if self.header_sets else {}
 
     def feed(self, id: str) -> Feed:
         """The feed called *id*; ``KeyError`` when the city has none."""
@@ -52,8 +57,10 @@ def load_cities(
     """Read the city config, ordered as in the file.
 
     *path* defaults to ``$CITIES_FILE`` or the ``cities.toml`` next to this module.
-    A city whose headers reference an unset environment variable loads with
-    ``disabled_reason`` set and no headers. Bad config raises ``ValueError``.
+    ``headers`` is a table or a list of tables (one per API key; requests rotate
+    through them and ``max_requests_per_second``/``daily_quota`` are per key).
+    A header set referencing an unset environment variable is skipped; a city
+    left with none loads with ``disabled_reason`` set. Bad config raises ``ValueError``.
     """
     env = os.environ if env is None else env
     if path is None:
@@ -81,7 +88,9 @@ def _parse_city(cid: str, section: dict, env: Mapping[str, str]) -> City:
         for feed_id in default_feeds:
             if feed_id not in by_id:
                 raise ValueError(f"default feed {feed_id!r} is not a configured feed")
-        headers, disabled_reason = _expand_headers(section.get("headers", {}), env)
+        header_sets, disabled_reason = _expand_header_sets(section.get("headers", {}), env)
+        keys = max(len(header_sets), 1)  # limits in the file are per key
+        daily_quota = section.get("daily_quota")
         s3_prefix = section["s3_prefix"]
         if cid == "sydney" and env.get("S3_PREFIX"):
             s3_prefix = env["S3_PREFIX"]
@@ -103,11 +112,11 @@ def _parse_city(cid: str, section: dict, env: Mapping[str, str]) -> City:
             s3_prefix=s3_prefix.strip("/"),
             attribution=section["attribution"],
             interval=float(section["interval"]),
-            max_requests_per_second=float(section["max_requests_per_second"]),
-            daily_quota=section.get("daily_quota"),
+            max_requests_per_second=float(section["max_requests_per_second"]) * keys,
+            daily_quota=None if daily_quota is None else daily_quota * keys,
             default_feeds=default_feeds,
             feeds=feeds,
-            headers=headers,
+            header_sets=header_sets,
             route_label_pattern=pattern,
             static_gtfs=section.get("static_gtfs"),
             disabled_reason=disabled_reason,
@@ -119,13 +128,22 @@ def _parse_city(cid: str, section: dict, env: Mapping[str, str]) -> City:
         raise ValueError(f"city {cid!r}: {exc}") from exc
 
 
-def _expand_headers(
-    headers: Mapping[str, str], env: Mapping[str, str]
-) -> tuple[dict[str, str], str | None]:
-    expanded: dict[str, str] = {}
-    for name, value in headers.items():
-        for var in _ENV_REF.findall(value):
-            if not env.get(var):
-                return {}, f"{var} is not set"
-        expanded[name] = _ENV_REF.sub(lambda m: env[m.group(1)], value)
-    return expanded, None
+def _expand_header_sets(
+    headers: Mapping[str, str] | list[Mapping[str, str]], env: Mapping[str, str]
+) -> tuple[tuple[dict[str, str], ...], str | None]:
+    """Expanded header sets, skipping those with an unset env var; the reason when none is left."""
+    if isinstance(headers, Mapping):
+        if not headers:
+            return (), None
+        headers = [headers]
+    sets: list[dict[str, str]] = []
+    first_missing = None
+    for headers_ in headers:
+        missing = next((v for value in headers_.values() for v in _ENV_REF.findall(value) if not env.get(v)), None)
+        if missing:
+            first_missing = first_missing or missing
+            continue
+        sets.append({name: _ENV_REF.sub(lambda m: env[m.group(1)], value) for name, value in headers_.items()})
+    if headers and not sets:
+        return (), f"{first_missing} is not set"
+    return tuple(sets), None

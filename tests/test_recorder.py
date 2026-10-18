@@ -267,6 +267,22 @@ def test_polls_each_enabled_feed_url_with_city_headers_spaced_by_rate_limit(tmp_
     assert waits == [1 / SYDNEY.max_requests_per_second] * 2  # 0.2 s between requests
 
 
+def test_rotates_api_keys_across_requests(tmp_path):
+    city = load_cities(env={"TFNSW_API_KEY": "k", "TFNSW_API_KEY_2": "k2"})["sydney"]
+    feeds = ("buses", "sydneytrains", "metro")
+    store = store_for(tmp_path, feeds).for_city("sydney")
+    client = FakeClient({f: [vp(f)] for f in feeds}, city=city)
+    rec = Recorder(client, city, store, tmp_path, lambda p: None,
+                   routes=RouteInfo(city, tmp_path / "sydney"), clock=lambda: utc(2026, 10, 16, 1, 11))
+    waits = []
+    rec._stop.wait = waits.append
+    rec.poll_once(store.get())
+    rec.poll_once(store.get())
+    keys = [h["Authorization"] for h in client.headers]
+    assert keys == ["apikey k", "apikey k2"] * 3
+    assert waits[0] == 1 / 10  # two keys: twice the per-key rate
+
+
 def test_recorder_accepts_the_settings_store(tmp_path):
     store = store_for(tmp_path, ["metro"])
     client = FakeClient({"metro": [vp("m")]})

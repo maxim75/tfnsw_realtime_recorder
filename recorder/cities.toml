@@ -6,8 +6,8 @@ zoom = 10.3
 s3_prefix = "vehiclepos"             # existing layout; env S3_PREFIX overrides it
 attribution = "Transport for NSW (CC BY 4.0)"
 interval = 30                        # default poll interval, s
-max_requests_per_second = 5
-daily_quota = 60000
+max_requests_per_second = 5          # per API key
+daily_quota = 60000                  # per API key
 default_feeds = [
     "buses",
     "sydneytrains",
@@ -21,7 +21,12 @@ default_feeds = [
     "regionbuses/sydneysurrounds",
 ]
 route_label = { pattern = '_(?P<label>[^_]+)$' }          # 2510_333 -> 333
-headers = { Authorization = "apikey ${TFNSW_API_KEY}" }   # env expanded at load
+# One header set per API key (env expanded at load); requests alternate between
+# the keys that are set, and the limits above scale with their number.
+headers = [
+    { Authorization = "apikey ${TFNSW_API_KEY}" },
+    { Authorization = "apikey ${TFNSW_API_KEY_2}" },   # optional second key
+]
 
   [[sydney.feeds]]
   id = "buses"

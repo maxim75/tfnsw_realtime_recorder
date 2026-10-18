@@ -73,8 +73,8 @@ def test_repo_file_keeps_sydney_first_and_prague():
     assert [f.id for f in sydney.feeds] == list(KNOWN_FEEDS)
     assert sydney.default_feeds == DEFAULT_FEEDS
     assert sydney.s3_prefix == "vehiclepos"
-    assert sydney.daily_quota == 60000 and prague.daily_quota is None
-    assert sydney.max_requests_per_second == 5 and prague.max_requests_per_second == 1
+    assert sydney.daily_quota == 120000 and prague.daily_quota is None  # REPO_ENV sets both keys
+    assert sydney.max_requests_per_second == 10 and prague.max_requests_per_second == 1
     assert sydney.center == (151.05, -33.85)
     assert sydney.route_label_pattern == r"_(?P<label>[^_]+)$"
     assert prague.s3_prefix == "vehiclepos/city=prague"
@@ -149,6 +149,24 @@ def test_missing_env_disables_city_only(env):
     assert cities["sydney"].disabled_reason == "TFNSW_API_KEY is not set"
     assert cities["sydney"].headers == {}
     assert cities["prague"].disabled_reason is None
+
+
+def test_second_key_adds_a_header_set_and_scales_limits():
+    sydney = load_cities(env={**KEY_ENV, "TFNSW_API_KEY_2": "other"})["sydney"]
+    assert sydney.header_sets == ({"Authorization": "apikey secret"}, {"Authorization": "apikey other"})
+    assert sydney.max_requests_per_second == 10 and sydney.daily_quota == 120000
+
+
+def test_one_key_keeps_per_key_limits():
+    sydney = load_cities(env=KEY_ENV)["sydney"]
+    assert sydney.header_sets == ({"Authorization": "apikey secret"},)
+    assert sydney.max_requests_per_second == 5 and sydney.daily_quota == 60000
+
+
+def test_only_second_key_set_still_enables_city():
+    sydney = load_cities(env={"TFNSW_API_KEY_2": "other"})["sydney"]
+    assert sydney.disabled_reason is None
+    assert sydney.header_sets == ({"Authorization": "apikey other"},)
 
 
 def test_s3_prefix_env_overrides_sydney_prefix():

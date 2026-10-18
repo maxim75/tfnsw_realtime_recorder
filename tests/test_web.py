@@ -133,7 +133,7 @@ def test_status(ctx):
     body = client.get("/api/status", auth=AUTH).json()
     assert body["recorder"]["alive"] is True
     assert body["settings"]["interval"] == 30
-    assert body["quota"] == {"requests_per_day": 28800, "daily_quota": 60000}
+    assert body["quota"] == {"requests_per_day": 28800, "daily_quota": 120000}  # two keys
     feeds = {f["feed"]: f for f in body["feeds"]}
     assert len(feeds) == 23
     assert feeds["buses"]["enabled"] is True and feeds["buses"]["vehicles"] == 5
@@ -441,7 +441,7 @@ def test_cities_lists_config_in_order(ctx):
     assert syd["zoom"] > 0 and syd["attribution"]
     assert syd["modes"] == sorted(syd["modes"]) and {"bus", "metro", "rail", "ferry", "tram"} <= set(syd["modes"])
     assert syd["enabled"] is True and syd["disabled_reason"] is None
-    assert syd["daily_quota"] == 60000 and syd["max_requests_per_second"] > 0
+    assert syd["daily_quota"] == 120000 and syd["max_requests_per_second"] > 0
     assert prague["timezone"] == "Europe/Prague" and prague["daily_quota"] is None
     assert "secret" not in str(body)
 

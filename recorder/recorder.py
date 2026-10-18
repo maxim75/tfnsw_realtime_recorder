@@ -105,6 +105,7 @@ class Recorder:
         self._data_dir = city_dir(data_dir, city.id)
         self._on_complete = on_complete
         # stay under the city's rate limit
+        self._requests = 0  # rotates through the city's API keys
         self._spacing = 1 / city.max_requests_per_second if request_spacing is None else request_spacing
         self._tz = tz = city.timezone
         self._clock = clock or (lambda: datetime.now(tz=tz))
@@ -200,11 +201,18 @@ class Recorder:
             st.last_error = str(exc) or type(exc).__name__
             st.last_error_at = fetched_at
 
+    def _next_headers(self) -> dict[str, str]:
+        sets = self.city.header_sets
+        if not sets:
+            return {}
+        self._requests += 1
+        return sets[(self._requests - 1) % len(sets)]
+
     def _poll_feed(self, feed: str) -> tuple[int | None, int]:
         """Poll one feed. Returns (vehicles, new rows), or (None, 0) on error."""
         fetched_at = self._clock()
         try:
-            positions = self._client.fetch(self.city.feed(feed).url, self.city.headers)
+            positions = self._client.fetch(self.city.feed(feed).url, self._next_headers())
             seen = dict(self._last_seen.get(feed, {}))
             rows = new_rows(positions, seen, fetched_at, self._tz)
             writer = self._writers.get(feed)

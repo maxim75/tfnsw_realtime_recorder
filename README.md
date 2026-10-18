@@ -14,6 +14,7 @@ URLs, configured per city in `recorder/cities.toml` (see [Cities](#cities)).
 | Variable | Required | Notes |
 |---|---|---|
 | `TFNSW_API_KEY` | for Sydney | TfNSW Open Data key with *Realtime Vehicle Positions* enabled. Without it Sydney is disabled (logged and shown on the status page) and the other cities keep recording |
+| `TFNSW_API_KEY_2` | no | second TfNSW key. Requests alternate between the two keys, and Sydney's rate limit (5 req/s) and daily quota (60,000) double, since TfNSW applies them per key |
 | `ADMIN_USER`, `ADMIN_PASSWORD` | yes | basic-auth login for the web page |
 | `S3_BUCKET` | to upload | without it, finished files stay in `DATA_DIR/complete/` |
 | `S3_ACCESS_KEY_ID`, `S3_SECRET_ACCESS_KEY` | with `S3_BUCKET` | Hetzner Console → Security → S3 credentials |
@@ -55,7 +56,8 @@ default_feeds = ["all"]
 
 Optional settings: `daily_quota` (requests/day, shown and warned about on the
 status page; Sydney only), `headers` (e.g.
-`{ Authorization = "apikey ${TFNSW_API_KEY}" }`) and `route_label`.
+`{ Authorization = "apikey ${TFNSW_API_KEY}" }`, or a list of such tables
+for several API keys) and `route_label`.
 
 **Adding a city:** you need a GTFS-Realtime *vehicle positions* feed (a URL
 returning the protobuf). Add a section like the one above with at least
@@ -71,8 +73,11 @@ returning the protobuf). Add a section like the one above with at least
   `label` that extracts the displayed line name from the route id, e.g.
   Sydney's `_(?P<label>[^_]+)$` turns `2510_333` into `333`.
 - `headers` (optional) are sent with every request; `${ENV_NAME}` is replaced
-  by that environment variable. If one is unset, the city is loaded as
-  disabled and the others keep running.
+  by that environment variable. A list of header tables (one per API key)
+  makes requests rotate through them; `max_requests_per_second` and
+  `daily_quota` are then per key and multiplied by the number of keys that
+  are set. A header table with an unset variable is skipped; if none is
+  left, the city is loaded as disabled and the others keep running.
 - Restart the service. No code changes are needed.
 
 **Where data goes.** In S3, each city has its own prefix: Sydney keeps the
@@ -373,6 +378,7 @@ the `ports:` mapping if it clashes with something else on the server.
 
    ```
    TFNSW_API_KEY=...
+   TFNSW_API_KEY_2=...        # optional second key
    ADMIN_USER=...
    ADMIN_PASSWORD=...
    S3_ENDPOINT_URL=https://nbg1.your-objectstorage.com
