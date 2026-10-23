@@ -14,7 +14,7 @@ URLs, configured per city in `recorder/cities.toml` (see [Cities](#cities)).
 | Variable | Required | Notes |
 |---|---|---|
 | `TFNSW_API_KEY` | for Sydney | TfNSW Open Data key with *Realtime Vehicle Positions* enabled. Without it Sydney is disabled (logged and shown on the status page) and the other cities keep recording |
-| `TFNSW_API_KEY_2` | no | second TfNSW key. Requests alternate between the two keys, and Sydney's rate limit (5 req/s) and daily quota (60,000) double, since TfNSW applies them per key |
+| `TFNSW_API_KEY_2` | no | second TfNSW key. Requests alternate between the two keys. Sydney's rate limit (5 req/s) and daily quota (60,000) stay the same: TfNSW applies them per account, so a second key from the same account does not raise them |
 | `ADMIN_USER`, `ADMIN_PASSWORD` | yes | basic-auth login for the web page |
 | `S3_BUCKET` | to upload | without it, finished files stay in `DATA_DIR/complete/` |
 | `S3_ACCESS_KEY_ID`, `S3_SECRET_ACCESS_KEY` | with `S3_BUCKET` | Hetzner Console → Security → S3 credentials |
@@ -75,8 +75,8 @@ returning the protobuf). Add a section like the one above with at least
 - `headers` (optional) are sent with every request; `${ENV_NAME}` is replaced
   by that environment variable. A list of header tables (one per API key)
   makes requests rotate through them; `max_requests_per_second` and
-  `daily_quota` are then per key and multiplied by the number of keys that
-  are set. A header table with an unset variable is skipped; if none is
+  `daily_quota` still apply to the city as a whole (TfNSW counts them per
+  account, not per key). A header table with an unset variable is skipped; if none is
   left, the city is loaded as disabled and the others keep running.
 - Restart the service. No code changes are needed.
 

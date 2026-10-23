@@ -58,7 +58,8 @@ def load_cities(
 
     *path* defaults to ``$CITIES_FILE`` or the ``cities.toml`` next to this module.
     ``headers`` is a table or a list of tables (one per API key; requests rotate
-    through them and ``max_requests_per_second``/``daily_quota`` are per key).
+    through them). ``max_requests_per_second``/``daily_quota`` are for the city as
+    a whole, whatever the number of keys: TfNSW keys of one account share them.
     A header set referencing an unset environment variable is skipped; a city
     left with none loads with ``disabled_reason`` set. Bad config raises ``ValueError``.
     """
@@ -89,7 +90,6 @@ def _parse_city(cid: str, section: dict, env: Mapping[str, str]) -> City:
             if feed_id not in by_id:
                 raise ValueError(f"default feed {feed_id!r} is not a configured feed")
         header_sets, disabled_reason = _expand_header_sets(section.get("headers", {}), env)
-        keys = max(len(header_sets), 1)  # limits in the file are per key
         daily_quota = section.get("daily_quota")
         s3_prefix = section["s3_prefix"]
         if cid == "sydney" and env.get("S3_PREFIX"):
@@ -112,8 +112,8 @@ def _parse_city(cid: str, section: dict, env: Mapping[str, str]) -> City:
             s3_prefix=s3_prefix.strip("/"),
             attribution=section["attribution"],
             interval=float(section["interval"]),
-            max_requests_per_second=float(section["max_requests_per_second"]) * keys,
-            daily_quota=None if daily_quota is None else daily_quota * keys,
+            max_requests_per_second=float(section["max_requests_per_second"]),
+            daily_quota=daily_quota,
             default_feeds=default_feeds,
             feeds=feeds,
             header_sets=header_sets,

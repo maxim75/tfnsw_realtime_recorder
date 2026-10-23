@@ -280,7 +280,7 @@ def test_rotates_api_keys_across_requests(tmp_path):
     rec.poll_once(store.get())
     keys = [h["Authorization"] for h in client.headers]
     assert keys == ["apikey k", "apikey k2"] * 3
-    assert waits[0] == 1 / 10  # two keys: twice the per-key rate
+    assert waits[0] == 1 / 5  # the keys share one rate limit
 
 
 def test_recorder_accepts_the_settings_store(tmp_path):
