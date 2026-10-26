@@ -68,6 +68,7 @@ def test_export_day_writes_index_and_window_files(tmp_path):
     assert index["end"] == index["start"] + 86400
     assert index["windows"] == {str(W1800): 2, str(W1800 + 600): 1}
     assert summary == {"windows": 2, "reports": 3}
+    assert index["modes"] == ["bus", "metro"]  # only modes with vehicles that day (feed modes of SYDNEY)
     window = json.loads(gzip.decompress((out / "w" / f"{W1800}.json.gz").read_bytes()))
     assert sorted(r[0] for r in decode_window(window)["buses"]) == ["a", "b"]
     assert {v[4] for v in window["vehicles"] if v[0] == 0} == {"bus"}  # feed mode as fallback

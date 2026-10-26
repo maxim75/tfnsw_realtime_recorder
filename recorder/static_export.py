@@ -113,7 +113,7 @@ def export_day(history, day: date, out: Path, *, now: float | None = None) -> di
     city = history._city
     modes = {feed.id: feed.mode for feed in city.feeds}
     starts = day_windows(day, history.tz)
-    windows, feeds_seen, total = {}, set(), 0
+    windows, feeds_seen, modes_seen, total = {}, set(), set(), 0
     for start in starts:
         if now < start + WINDOW_S + FINAL_AFTER_S:
             break  # still being recorded
@@ -121,10 +121,12 @@ def export_day(history, day: date, out: Path, *, now: float | None = None) -> di
         n = sum(len(r) for r in feeds.values())
         if not n:
             continue
-        body = json.dumps(encode_window(start, feeds, modes), separators=(",", ":")).encode()
+        encoded = encode_window(start, feeds, modes)
+        body = json.dumps(encoded, separators=(",", ":")).encode()
         (wdir / f"{start}.json.gz").write_bytes(gzip.compress(body, 9))
         windows[str(start)] = n
         feeds_seen |= set(feeds)
+        modes_seen |= {v[4] for v in encoded["vehicles"] if v[4]}
         total += n
         log.info("%s: %d reports", datetime.fromtimestamp(start, tz=history.tz).strftime("%H:%M"), n)
     index = {
@@ -141,6 +143,7 @@ def export_day(history, day: date, out: Path, *, now: float | None = None) -> di
         "window_seconds": WINDOW_S,
         "windows": windows,
         "feeds": sorted(feeds_seen),
+        "modes": sorted(modes_seen),  # the site offers a filter for these only
         "generated": datetime.now(tz=history.tz).isoformat(timespec="seconds"),
         "source": city.attribution,
     }
