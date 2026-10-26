@@ -259,6 +259,7 @@ const timeOfDay = (ts) => new Date(ts * 1000).toLocaleTimeString("en-AU", { time
 
 const overlay = new deck.MapboxOverlay({
   interleaved: true,
+  pickingRadius: 10,  // vehicles are small and moving: hover the nearest one within 10 px, not only the exact pixel
   getTooltip: ({ object: d }) => d && {
     html: `<b>${d.v.mode === "bus" ? "Route" : ""} ${esc(d.v.label) || "—"}</b> <span style="opacity:.7">${esc(d.v.feed)}</span><br>` +
           `Vehicle ${esc(d.v.vid)}<br>${d.speed == null ? "" : `${Math.round(d.speed * 3.6)} km/h · `}report ${timeOfDay(d.ts)}`,
