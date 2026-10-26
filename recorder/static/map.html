@@ -30,6 +30,9 @@
   #slider { width:100%; }
   .controls { display:flex; gap:6px; align-items:center; flex-wrap:wrap; }
   #playBtn { min-width:44px; font-size:15px; padding:2px 8px; }
+  .vtip { position:absolute; top:0; left:0; z-index:1; display:none; pointer-events:none; white-space:nowrap;
+          background:#29323c; color:#fff; font:12px/1.4 system-ui, sans-serif; padding:6px 8px; border-radius:4px;
+          box-shadow:0 2px 8px rgba(0,0,0,.3); }
   @media (max-width:500px) { #panel { width:auto; right:12px; } }
 </style>
 </head>
@@ -257,16 +260,38 @@ const ARROW = {
 };
 const timeOfDay = (ts) => new Date(ts * 1000).toLocaleTimeString("en-AU", { timeZone: city.timezone, hour12: false });
 
-const overlay = new deck.MapboxOverlay({
-  interleaved: true,
-  pickingRadius: 10,  // vehicles are small and moving: hover the nearest one within 10 px, not only the exact pixel
-  getTooltip: ({ object: d }) => d && {
-    html: `<b>${d.v.mode === "bus" ? "Route" : ""} ${esc(d.v.label) || "—"}</b> <span style="opacity:.7">${esc(d.v.feed)}</span><br>` +
-          `Vehicle ${esc(d.v.vid)}<br>${d.speed == null ? "" : `${Math.round(d.speed * 3.6)} km/h · `}report ${timeOfDay(d.ts)}`,
-    style: { fontSize: "12px", padding: "6px 8px" },
-  },
-});
+const overlay = new deck.MapboxOverlay({ interleaved: true });
 map.addControl(overlay);
+
+// Our own tooltip rather than deck's getTooltip: render() hands deck new layers every frame and deck drops
+// its tooltip on each update (it lasted ~300 ms). We remember the hovered vehicle and redraw its tooltip at
+// the vehicle's current position every frame, so it stays up and follows the vehicle while it moves.
+const PICK_RADIUS = 10;  // px: vehicles are small and moving, so hover the nearest one within reach
+const tipHtml = (d) =>
+  `<b>${d.v.mode === "bus" ? "Route" : ""} ${esc(d.v.label) || "—"}</b> <span style="opacity:.7">${esc(d.v.feed)}</span><br>` +
+  `${d.speed == null ? "" : `${Math.round(d.speed * 3.6)} km/h · `}report ${timeOfDay(d.ts)}`;
+const tip = document.createElement("div");
+tip.className = "vtip";
+map.getContainer().append(tip);
+let mouse = null, hovered = null, lastPick = 0;
+map.on("mousemove", (e) => { mouse = e.point; lastPick = 0; });
+map.on("mouseout", () => { mouse = null; hovered = null; });
+function updateTip(points) {
+  const now = performance.now();
+  if (mouse && (lastPick === 0 || (!hovered && now - lastPick > 100))) {  // on mouse move; else poll while nothing is hovered
+    const hit = overlay.pickObject({ x: mouse.x, y: mouse.y, radius: PICK_RADIUS });
+    hovered = hit?.object?.v ?? null;
+    lastPick = now;
+  }
+  const d = hovered && points.find((p) => p.v === hovered);
+  map.getCanvas().style.cursor = d ? "pointer" : "";
+  if (!d) { tip.style.display = "none"; return; }
+  tip.innerHTML = tipHtml(d);
+  tip.style.display = "block";
+  const { x, y } = map.project(d.position), box = map.getContainer();
+  const w = tip.offsetWidth, h = tip.offsetHeight;
+  tip.style.transform = `translate(${Math.max(4, Math.min(x + 12, box.clientWidth - w - 4))}px, ${y - h - 12 < 4 ? y + 12 : y - h - 12}px)`;
+}
 
 // Trails: built when a store's data or the filters change, not every frame.
 const trails = { store: null, version: -1, base: 0, data: [] };
@@ -322,6 +347,7 @@ function render(store, t, base) {
       }),
     ],
   });
+  updateTip(points);
   return points.length;
 }
 
